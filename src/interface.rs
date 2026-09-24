@@ -19,25 +19,45 @@ pub struct InterfaceBaseline {
 pub struct InterfaceController;
 
 impl InterfaceController {
-    /// Resolves the authoritative default egress interface via /proc/net/route
-    pub fn detect_default_egress() -> Result<String> {
-        let route_content = fs::read_to_string("/proc/net/route").map_err(|e| {
-            UmbraError::EgressResolutionFailed(format!("failed to read /proc/net/route: {e}"))
-        })?;
+    /// Parses /proc/net/route content and returns candidate default route interfaces ordered by metric (lowest metric first).
+    /// Filters out loopback ("lo") and routes without the RTF_UP flag.
+    pub fn parse_default_routes(route_content: &str) -> Vec<String> {
+        let mut candidates: Vec<(i32, String)> = Vec::new();
 
         // Format of /proc/net/route:
         // Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT
         for line in route_content.lines().skip(1) {
             let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() >= 2 {
+            if fields.len() >= 7 {
                 let iface = fields[0];
                 let destination = fields[1];
+                let flags_str = fields[3];
+                let metric_str = fields[6];
+
                 // Destination 00000000 indicates default route
-                if destination == "00000000" {
-                    // Verify interface actually exists in sysfs and is not loopback
-                    if iface != "lo" && Path::new("/sys/class/net").join(iface).exists() {
-                        return Ok(iface.to_string());
+                if destination == "00000000" && iface != "lo" {
+                    let flags = u16::from_str_radix(flags_str, 16).unwrap_or(0);
+                    // RTF_UP is 0x0001
+                    if (flags & 0x0001) != 0 {
+                        let metric = metric_str.parse::<i32>().unwrap_or(0);
+                        candidates.push((metric, iface.to_string()));
                     }
+                }
+            }
+        }
+
+        // Sort by metric ascending (lowest metric has highest routing priority)
+        candidates.sort_by_key(|&(metric, _)| metric);
+        candidates.into_iter().map(|(_, iface)| iface).collect()
+    }
+
+    /// Resolves the authoritative default egress interface via /proc/net/route (or ip route fallback)
+    pub fn detect_default_egress() -> Result<String> {
+        if let Ok(route_content) = fs::read_to_string("/proc/net/route") {
+            let candidates = Self::parse_default_routes(&route_content);
+            for iface in candidates {
+                if Path::new("/sys/class/net").join(&iface).exists() {
+                    return Ok(iface);
                 }
             }
         }
@@ -55,7 +75,7 @@ impl InterfaceController {
             let parts: Vec<&str> = stdout.split_whitespace().collect();
             if let Some(pos) = parts.iter().position(|&x| x == "dev") {
                 if let Some(dev_name) = parts.get(pos + 1) {
-                    if *dev_name != "lo" {
+                    if *dev_name != "lo" && Path::new("/sys/class/net").join(dev_name).exists() {
                         return Ok(dev_name.to_string());
                     }
                 }
@@ -67,15 +87,18 @@ impl InterfaceController {
         ))
     }
 
-    /// Captures the full baseline of an interface prior to any modification
-    pub fn capture_baseline(iface: &str) -> Result<InterfaceBaseline> {
-        let sys_path = Path::new("/sys/class/net").join(iface);
+    /// Captures the baseline of an interface from a specified sysfs net directory
+    pub fn capture_baseline_from_sysfs(
+        sysfs_root: &Path,
+        iface: &str,
+    ) -> Result<InterfaceBaseline> {
+        let sys_path = sysfs_root.join(iface);
         if !sys_path.exists() {
             return Err(UmbraError::InterfaceNotFound(iface.to_string()));
         }
 
-        let original_mac = Self::read_mac(iface)?;
-        let was_up = Self::is_administratively_up(iface)?;
+        let original_mac = Self::read_mac_from_sysfs(sysfs_root, iface)?;
+        let was_up = Self::is_administratively_up_from_sysfs(sysfs_root, iface)?;
 
         Ok(InterfaceBaseline {
             name: iface.to_string(),
@@ -84,9 +107,14 @@ impl InterfaceController {
         })
     }
 
-    /// Reads current MAC address from /sys/class/net/<iface>/address
-    pub fn read_mac(iface: &str) -> Result<MacAddress> {
-        let addr_path = Path::new("/sys/class/net").join(iface).join("address");
+    /// Captures the full baseline of an interface prior to any modification
+    pub fn capture_baseline(iface: &str) -> Result<InterfaceBaseline> {
+        Self::capture_baseline_from_sysfs(Path::new("/sys/class/net"), iface)
+    }
+
+    /// Reads current MAC address from <sysfs_root>/<iface>/address
+    pub fn read_mac_from_sysfs(sysfs_root: &Path, iface: &str) -> Result<MacAddress> {
+        let addr_path = sysfs_root.join(iface).join("address");
         let content = fs::read_to_string(&addr_path).map_err(|e| {
             UmbraError::InterfaceNotFound(format!(
                 "unable to read address for {iface} at {}: {e}",
@@ -97,9 +125,14 @@ impl InterfaceController {
         MacAddress::parse(&content)
     }
 
-    /// Checks if interface flags indicate administrative UP (IFF_UP = 0x1)
-    pub fn is_administratively_up(iface: &str) -> Result<bool> {
-        let flags_path = Path::new("/sys/class/net").join(iface).join("flags");
+    /// Reads current MAC address from /sys/class/net/<iface>/address
+    pub fn read_mac(iface: &str) -> Result<MacAddress> {
+        Self::read_mac_from_sysfs(Path::new("/sys/class/net"), iface)
+    }
+
+    /// Checks if interface flags indicate administrative UP (IFF_UP = 0x1) from sysfs
+    pub fn is_administratively_up_from_sysfs(sysfs_root: &Path, iface: &str) -> Result<bool> {
+        let flags_path = sysfs_root.join(iface).join("flags");
         let content = fs::read_to_string(&flags_path).map_err(|e| {
             UmbraError::InterfaceNotFound(format!(
                 "unable to read flags for {iface} at {}: {e}",
@@ -114,6 +147,11 @@ impl InterfaceController {
 
         // 0x1 is IFF_UP
         Ok((flags & 0x1) != 0)
+    }
+
+    /// Checks if interface flags indicate administrative UP (IFF_UP = 0x1)
+    pub fn is_administratively_up(iface: &str) -> Result<bool> {
+        Self::is_administratively_up_from_sysfs(Path::new("/sys/class/net"), iface)
     }
 
     /// Sets interface administrative state UP or DOWN using ip link
@@ -142,7 +180,7 @@ impl InterfaceController {
     /// 1. Brings interface down if up
     /// 2. Sets new MAC
     /// 3. Restores administrative state
-    /// 4. Verifies live MAC matches
+    /// 4. Verifies live MAC and admin state match
     pub fn apply_mac(iface: &str, new_mac: MacAddress) -> Result<()> {
         let was_up = Self::is_administratively_up(iface)?;
 
@@ -177,13 +215,24 @@ impl InterfaceController {
             });
         }
 
-        // Live verification
+        // Live verification of MAC
         let live_mac = Self::read_mac(iface)?;
         if live_mac != new_mac {
             return Err(UmbraError::MacVerificationMismatch {
                 interface: iface.to_string(),
                 expected: new_mac.to_string(),
                 actual: live_mac.to_string(),
+            });
+        }
+
+        // Live verification of administrative state
+        let live_up = Self::is_administratively_up(iface)?;
+        if live_up != was_up {
+            return Err(UmbraError::InterfaceStateChangeFailed {
+                interface: iface.to_string(),
+                reason: format!(
+                    "admin state mismatch after MAC change: expected up={was_up}, actual={live_up}"
+                ),
             });
         }
 
@@ -230,13 +279,25 @@ impl InterfaceController {
             });
         }
 
-        // Live verification
+        // Live verification of MAC
         let live_mac = Self::read_mac(&baseline.name)?;
         if live_mac != baseline.original_mac {
             return Err(UmbraError::MacVerificationMismatch {
                 interface: baseline.name.clone(),
                 expected: baseline.original_mac.to_string(),
                 actual: live_mac.to_string(),
+            });
+        }
+
+        // Live verification of administrative state
+        let live_up = Self::is_administratively_up(&baseline.name)?;
+        if live_up != baseline.was_up {
+            return Err(UmbraError::InterfaceStateChangeFailed {
+                interface: baseline.name.clone(),
+                reason: format!(
+                    "admin state mismatch after restoration: expected up={}, actual={}",
+                    baseline.was_up, live_up
+                ),
             });
         }
 

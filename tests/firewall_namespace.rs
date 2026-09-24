@@ -1,0 +1,272 @@
+mod common;
+
+use std::process::{Command, Stdio};
+use umbra::constants::{
+    DEFAULT_TOR_CONTROLPORT, DEFAULT_TOR_DNSPORT, DEFAULT_TOR_TRANSPORT, NFT_TABLE_FAMILY,
+    NFT_TABLE_NAME, OWNERSHIP_MARKER,
+};
+use umbra::error::UmbraError;
+use umbra::firewall::{FirewallConfig, FirewallController};
+
+fn get_test_config() -> FirewallConfig {
+    FirewallConfig {
+        table_name: NFT_TABLE_NAME.to_string(),
+        table_family: NFT_TABLE_FAMILY.to_string(),
+        tor_uid: 122,
+        tor_transport_port: DEFAULT_TOR_TRANSPORT,
+        tor_dns_port: DEFAULT_TOR_DNSPORT,
+        tor_control_port: DEFAULT_TOR_CONTROLPORT,
+        egress_interface: "lo".to_string(),
+        activation_id: "test_netns_act".to_string(),
+    }
+}
+
+#[test]
+fn test_firewall_lifecycle_isolated_netns() {
+    if !common::is_in_isolated_netns() {
+        // Verify host firewall has no umbra table prior to test
+        let host_exists_before =
+            FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap_or(false);
+
+        let netns = common::IsolatedNetns::new("umbra_fw_life").expect("netns isolation required");
+        netns.run_test("test_firewall_lifecycle_isolated_netns");
+
+        // Verify host firewall was completely untouched by the isolated test
+        let host_exists_after =
+            FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap_or(false);
+        assert_eq!(
+            host_exists_before, host_exists_after,
+            "Host firewall state was mutated by isolated netns test!"
+        );
+        return;
+    }
+
+    let config = get_test_config();
+
+    // 1. Initially, table inet umbra must NOT exist in this isolated namespace
+    assert!(
+        !FirewallController::table_exists(&config.table_family, &config.table_name)
+            .expect("query table exists"),
+        "Table must not exist initially in fresh namespace"
+    );
+
+    // 2. Install the atomic firewall ruleset
+    FirewallController::install(&config).expect("firewall installation must succeed");
+
+    // 3. Verify table now exists in kernel
+    assert!(
+        FirewallController::table_exists(&config.table_family, &config.table_name)
+            .expect("query table exists"),
+        "Table must exist after installation"
+    );
+
+    // 4. Verify ownership authentication
+    FirewallController::authenticate_ownership(&config.table_family, &config.table_name)
+        .expect("ownership must be authenticated with marker");
+
+    // 5. Verify live firewall verification succeeds
+    FirewallController::verify_live(&config)
+        .expect("live verification of chains and rules must succeed");
+
+    // 6. Inspect raw kernel table ruleset to verify exact rules and markers
+    let output = Command::new("nft")
+        .args(["list", "table", &config.table_family, &config.table_name])
+        .output()
+        .expect("nft list table");
+    assert!(output.status.success());
+    let table_content = String::from_utf8_lossy(&output.stdout);
+
+    assert!(table_content.contains("table inet umbra"));
+    assert!(table_content.contains("chain output_nat"));
+    assert!(table_content.contains("chain output_filter"));
+    assert!(table_content.contains(OWNERSHIP_MARKER));
+    assert!(table_content.contains("skuid 122 return"));
+    assert!(table_content.contains("skuid 122 accept"));
+    assert!(table_content.contains("redirect to :5353"));
+    assert!(table_content.contains("redirect to :9040"));
+    assert!(table_content.contains("reject with tcp reset"));
+    assert!(table_content.contains("meta l4proto udp drop"));
+    assert!(table_content.contains("ip6 daddr != ::1 drop"));
+
+    // 7. Teardown firewall
+    FirewallController::teardown(&config.table_family, &config.table_name)
+        .expect("teardown must succeed");
+
+    // 8. Verify table is completely absent after teardown
+    assert!(
+        !FirewallController::table_exists(&config.table_family, &config.table_name)
+            .expect("query table exists"),
+        "Table must be absent after teardown"
+    );
+
+    // 9. Teardown idempotency: calling teardown again when absent succeeds cleanly
+    FirewallController::teardown(&config.table_family, &config.table_name)
+        .expect("subsequent teardown must succeed idempotently");
+}
+
+#[test]
+fn test_firewall_coexistence_with_unrelated_tables() {
+    if !common::is_in_isolated_netns() {
+        let netns = common::IsolatedNetns::new("umbra_fw_coex").expect("netns isolation required");
+        netns.run_test("test_firewall_coexistence_with_unrelated_tables");
+        return;
+    }
+
+    let config = get_test_config();
+    let foreign_table = "unrelated_firewall";
+
+    // 1. Create unrelated table and chain prior to Umbra activation
+    let st = Command::new("nft")
+        .args(["add", "table", "inet", foreign_table])
+        .status()
+        .expect("create foreign table");
+    assert!(st.success());
+
+    let st = Command::new("nft")
+        .args([
+            "add",
+            "chain",
+            "inet",
+            foreign_table,
+            "custom_chain",
+            "{ type filter hook input priority 0; policy accept; }",
+        ])
+        .status()
+        .expect("create foreign chain");
+    assert!(st.success());
+
+    assert!(FirewallController::table_exists("inet", foreign_table).unwrap());
+
+    // 2. Install Umbra firewall
+    FirewallController::install(&config).expect("install umbra firewall");
+
+    // 3. Verify BOTH tables coexist in the kernel
+    assert!(FirewallController::table_exists(&config.table_family, &config.table_name).unwrap());
+    assert!(FirewallController::table_exists("inet", foreign_table).unwrap());
+
+    // 4. Teardown Umbra firewall
+    FirewallController::teardown(&config.table_family, &config.table_name).expect("teardown umbra");
+
+    // 5. Verify Umbra table is gone, but unrelated table is 100% PRESERVED
+    assert!(!FirewallController::table_exists(&config.table_family, &config.table_name).unwrap());
+    assert!(
+        FirewallController::table_exists("inet", foreign_table).unwrap(),
+        "Unrelated table must NOT be destroyed by Umbra teardown"
+    );
+
+    // Verify chain is intact in the unrelated table
+    let list_out = Command::new("nft")
+        .args(["list", "table", "inet", foreign_table])
+        .output()
+        .expect("list foreign table");
+    assert!(list_out.status.success());
+    let list_str = String::from_utf8_lossy(&list_out.stdout);
+    assert!(list_str.contains("custom_chain"));
+
+    // Clean up foreign table
+    let _ = Command::new("nft")
+        .args(["delete", "table", "inet", foreign_table])
+        .status();
+}
+
+#[test]
+fn test_firewall_unauthorized_table_ownership_rejected() {
+    if !common::is_in_isolated_netns() {
+        let netns = common::IsolatedNetns::new("umbra_fw_auth").expect("netns isolation required");
+        netns.run_test("test_firewall_unauthorized_table_ownership_rejected");
+        return;
+    }
+
+    let config = get_test_config();
+
+    // 1. Create a foreign table named `table inet umbra` WITHOUT the required ownership marker
+    let st = Command::new("nft")
+        .args(["add", "table", "inet", &config.table_name])
+        .status()
+        .expect("create rogue table");
+    assert!(st.success());
+
+    // Table exists
+    assert!(FirewallController::table_exists(&config.table_family, &config.table_name).unwrap());
+
+    // 2. Ownership authentication must FAIL
+    let auth_res =
+        FirewallController::authenticate_ownership(&config.table_family, &config.table_name);
+    assert!(
+        matches!(auth_res, Err(UmbraError::FirewallOwnershipUnknown(_))),
+        "Authentication must fail when ownership marker is absent"
+    );
+
+    // 3. Teardown MUST REFUSE to delete the table because ownership cannot be proven
+    let teardown_res = FirewallController::teardown(&config.table_family, &config.table_name);
+    assert!(
+        matches!(teardown_res, Err(UmbraError::FirewallOwnershipUnknown(_))),
+        "Teardown must refuse to delete unauthenticated table"
+    );
+
+    // 4. Verify table is STILL in kernel (Umbra did not touch it)
+    assert!(
+        FirewallController::table_exists(&config.table_family, &config.table_name).unwrap(),
+        "Foreign table must remain untouched"
+    );
+
+    // Clean up foreign table
+    let _ = Command::new("nft")
+        .args(["delete", "table", &config.table_family, &config.table_name])
+        .status();
+}
+
+#[test]
+fn test_firewall_verify_live_fails_if_chain_missing() {
+    if !common::is_in_isolated_netns() {
+        let netns = common::IsolatedNetns::new("umbra_fw_miss").expect("netns isolation required");
+        netns.run_test("test_firewall_verify_live_fails_if_chain_missing");
+        return;
+    }
+
+    let config = get_test_config();
+
+    // Create a table with ownership marker but missing `output_filter` chain
+    let partial_ruleset = format!(
+        r#"table inet {table} {{
+    chain output_nat {{
+        type nat hook output priority dstnat; policy accept;
+        comment "{marker}"
+    }}
+}}
+"#,
+        table = config.table_name,
+        marker = OWNERSHIP_MARKER
+    );
+
+    let mut child = Command::new("nft")
+        .args(["-f", "-"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn nft");
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(partial_ruleset.as_bytes())
+        .unwrap();
+    let status = child.wait().expect("wait nft");
+    assert!(status.success());
+
+    // Ownership check passes because marker is present in comment
+    assert!(
+        FirewallController::authenticate_ownership(&config.table_family, &config.table_name)
+            .is_ok()
+    );
+
+    // Live verification MUST fail because `output_filter` is absent
+    let verify_res = FirewallController::verify_live(&config);
+    assert!(
+        matches!(verify_res, Err(UmbraError::FirewallVerificationFailed(_))),
+        "verify_live must fail when required chain output_filter is missing"
+    );
+
+    // Teardown the table
+    FirewallController::teardown(&config.table_family, &config.table_name).expect("teardown");
+}

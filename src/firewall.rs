@@ -79,25 +79,56 @@ impl FirewallController {
 
     /// Verifies the syntax of the generated ruleset without applying it (nft -c -f -)
     pub fn check_syntax(ruleset: &str) -> Result<()> {
-        let mut child = Command::new("nft")
-            .args(["-c", "-f", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                UmbraError::FirewallInstallFailed(format!("failed to spawn nft -c: {e}"))
-            })?;
+        let run_check =
+            |use_unshare: bool| -> std::result::Result<std::process::Output, std::io::Error> {
+                let mut cmd = if use_unshare {
+                    let mut c = Command::new("unshare");
+                    c.args(["-r", "-n", "nft", "-c", "-f", "-"]);
+                    c
+                } else {
+                    let mut c = Command::new("nft");
+                    c.args(["-c", "-f", "-"]);
+                    c
+                };
 
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(ruleset.as_bytes()).map_err(|e| {
-                UmbraError::FirewallInstallFailed(format!("failed to pipe ruleset to nft: {e}"))
-            })?;
-        }
+                let mut child = cmd
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()?;
 
-        let output = child.wait_with_output().map_err(|e| {
-            UmbraError::FirewallInstallFailed(format!("failed waiting for nft -c: {e}"))
-        })?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(ruleset.as_bytes())?;
+                }
+
+                child.wait_with_output()
+            };
+
+        // First attempt standard nft -c -f -
+        let output = match run_check(false) {
+            Ok(out) => {
+                if !out.status.success() {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    if stderr.contains("Operation not permitted") {
+                        // Retry inside unprivileged user namespace if unshare is available
+                        run_check(true).map_err(|e| {
+                            UmbraError::FirewallInstallFailed(format!(
+                                "failed to spawn unshare nft: {e}"
+                            ))
+                        })?
+                    } else {
+                        out
+                    }
+                } else {
+                    out
+                }
+            }
+            Err(e) => {
+                return Err(UmbraError::FirewallInstallFailed(format!(
+                    "failed to spawn nft -c: {e}"
+                )));
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -171,6 +202,23 @@ impl FirewallController {
         }
     }
 
+    /// Authenticates that the given ruleset text contains the required ownership marker
+    pub fn authenticate_ruleset_text(ruleset: &str) -> Result<()> {
+        if ruleset.trim().is_empty() {
+            return Err(UmbraError::FirewallOwnershipUnknown(
+                "empty ruleset cannot be authenticated".to_string(),
+            ));
+        }
+
+        if !ruleset.contains(OWNERSHIP_MARKER) {
+            return Err(UmbraError::FirewallOwnershipUnknown(format!(
+                "ruleset missing required ownership marker '{OWNERSHIP_MARKER}'"
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Authenticates that the live table is strictly owned by Umbra
     pub fn authenticate_ownership(family: &str, table: &str) -> Result<()> {
         let output = Command::new("nft")
@@ -187,13 +235,11 @@ impl FirewallController {
         }
 
         let content = String::from_utf8_lossy(&output.stdout);
-        if !content.contains(OWNERSHIP_MARKER) {
-            return Err(UmbraError::FirewallOwnershipUnknown(format!(
+        Self::authenticate_ruleset_text(&content).map_err(|_| {
+            UmbraError::FirewallOwnershipUnknown(format!(
                 "table {family} {table} missing required ownership marker '{OWNERSHIP_MARKER}'"
-            )));
-        }
-
-        Ok(())
+            ))
+        })
     }
 
     /// Verifies live enforcement: table exists, ownership authenticated, required chains active
