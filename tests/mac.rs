@@ -71,24 +71,32 @@ fn test_mac_properties_and_predicates() {
     let zero_mac = MacAddress::new([0, 0, 0, 0, 0, 0]);
     assert!(!zero_mac.is_locally_administered());
     assert!(zero_mac.is_unicast());
+    assert!(!zero_mac.is_multicast());
+    assert!(zero_mac.is_all_zeros());
     assert!(!zero_mac.is_valid_randomized());
 
     // Multicast (bit 0 = 1)
     let multicast_mac = MacAddress::new([0x03, 0x00, 0x5e, 0x00, 0x00, 0x01]);
     assert!(!multicast_mac.is_unicast());
+    assert!(multicast_mac.is_multicast());
     assert!(multicast_mac.is_locally_administered());
+    assert!(!multicast_mac.is_all_zeros());
     assert!(!multicast_mac.is_valid_randomized());
 
     // Globally administered (bit 1 = 0)
     let global_mac = MacAddress::new([0x00, 0x15, 0x5d, 0xd8, 0x1e, 0xd5]);
     assert!(global_mac.is_unicast());
+    assert!(!global_mac.is_multicast());
     assert!(!global_mac.is_locally_administered());
+    assert!(!global_mac.is_all_zeros());
     assert!(!global_mac.is_valid_randomized());
 
     // Valid locally administered unicast
     let valid_mac = MacAddress::new([0x02, 0x15, 0x5d, 0xd8, 0x1e, 0xd5]);
     assert!(valid_mac.is_unicast());
+    assert!(!valid_mac.is_multicast());
     assert!(valid_mac.is_locally_administered());
+    assert!(!valid_mac.is_all_zeros());
     assert!(valid_mac.is_valid_randomized());
 }
 

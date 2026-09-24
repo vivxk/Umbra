@@ -198,3 +198,39 @@ fn test_interface_nonexistent_device_handling() {
         Err(UmbraError::InterfaceStateChangeFailed { .. })
     ));
 }
+
+#[test]
+fn test_interface_loopback_rejected_in_netns() {
+    if !common::is_in_isolated_netns() {
+        let netns = common::IsolatedNetns::new("umbra_if_lo").expect("netns isolation required");
+        netns.run_test("test_interface_loopback_rejected_in_netns");
+        return;
+    }
+
+    // capture_baseline on lo must fail
+    let res = InterfaceController::capture_baseline("lo");
+    assert!(
+        matches!(res, Err(UmbraError::InterfaceNotFound(_))),
+        "Capturing baseline on loopback must be rejected"
+    );
+
+    // apply_mac on lo must fail
+    let rand_mac = MacAddress::generate_random().unwrap();
+    let res = InterfaceController::apply_mac("lo", rand_mac);
+    assert!(
+        matches!(res, Err(UmbraError::MacChangeFailed { .. })),
+        "Applying MAC on loopback must be rejected"
+    );
+
+    // restore_baseline on lo must fail
+    let lo_baseline = umbra::interface::InterfaceBaseline {
+        name: "lo".to_string(),
+        original_mac: rand_mac,
+        was_up: true,
+    };
+    let res = InterfaceController::restore_baseline(&lo_baseline);
+    assert!(
+        matches!(res, Err(UmbraError::MacRestoreFailed { .. })),
+        "Restoring baseline on loopback must be rejected"
+    );
+}

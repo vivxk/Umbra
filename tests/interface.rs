@@ -1,7 +1,7 @@
 use std::fs;
 use tempfile::tempdir;
 use umbra::error::UmbraError;
-use umbra::interface::{InterfaceBaseline, InterfaceController};
+use umbra::interface::{InterfaceBaseline, InterfaceController, RouteCandidate};
 use umbra::mac::MacAddress;
 
 #[test]
@@ -12,8 +12,17 @@ eth0\t00000000\t011ED80A\t0003\t0\t0\t100\t00000000\t0\t0\t0
 eth0\t001ED80A\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0
 ";
 
-    let defaults = InterfaceController::parse_default_routes(route_table);
-    assert_eq!(defaults, vec!["eth0"]);
+    let candidates = InterfaceController::parse_default_routes(route_table);
+    assert_eq!(
+        candidates,
+        vec![RouteCandidate {
+            interface: "eth0".to_string(),
+            metric: 100,
+        }]
+    );
+
+    let ifaces = InterfaceController::parse_default_route_interfaces(route_table);
+    assert_eq!(ifaces, vec!["eth0"]);
 }
 
 #[test]
@@ -26,11 +35,94 @@ eth1\t00000000\t011ED80A\t0003\t0\t0\t200\t00000000\t0\t0\t0
 eth0\t00000000\t011ED80A\t0003\t0\t0\t100\t00000000\t0\t0\t0
 ";
 
-    let defaults = InterfaceController::parse_default_routes(route_table);
+    let defaults = InterfaceController::parse_default_route_interfaces(route_table);
     assert_eq!(
         defaults,
         vec!["eth0", "eth1", "wlan0"],
         "Default routes must be ordered by metric ascending (lowest metric first)"
+    );
+
+    let candidates = InterfaceController::parse_default_routes(route_table);
+    let authoritative = InterfaceController::resolve_authoritative_candidate(&candidates)
+        .expect("should resolve eth0 as lowest metric");
+    assert_eq!(authoritative, "eth0");
+}
+
+#[test]
+fn test_route_ambiguity_detection_fails_safely() {
+    // Ambiguous: two distinct interfaces (eth0 and wlan0) share identical lowest metric (100)
+    let ambiguous_candidates = vec![
+        RouteCandidate {
+            interface: "eth0".to_string(),
+            metric: 100,
+        },
+        RouteCandidate {
+            interface: "wlan0".to_string(),
+            metric: 100,
+        },
+        RouteCandidate {
+            interface: "eth1".to_string(),
+            metric: 200,
+        },
+    ];
+
+    let res = InterfaceController::resolve_authoritative_candidate(&ambiguous_candidates);
+    assert!(
+        matches!(res, Err(UmbraError::EgressResolutionFailed(_))),
+        "Must fail safely when multiple distinct interfaces share lowest metric"
+    );
+
+    // Duplicate entries for the same interface (e.g. multi-gateway on same dev) is NOT ambiguous
+    let duplicate_candidates = vec![
+        RouteCandidate {
+            interface: "eth0".to_string(),
+            metric: 100,
+        },
+        RouteCandidate {
+            interface: "eth0".to_string(),
+            metric: 100,
+        },
+        RouteCandidate {
+            interface: "eth1".to_string(),
+            metric: 200,
+        },
+    ];
+
+    let auth = InterfaceController::resolve_authoritative_candidate(&duplicate_candidates)
+        .expect("duplicate routes on the same interface must resolve to that interface");
+    assert_eq!(auth, "eth0");
+}
+
+#[test]
+fn test_parse_ip_route_default_output() {
+    let output = "\
+default via 192.168.1.1 dev eth0 proto dhcp metric 100
+default via 10.0.0.1 dev wlan0 proto dhcp metric 200
+";
+    let candidates = InterfaceController::parse_ip_route_default_output(output);
+    assert_eq!(
+        candidates,
+        vec![
+            RouteCandidate {
+                interface: "eth0".to_string(),
+                metric: 100,
+            },
+            RouteCandidate {
+                interface: "wlan0".to_string(),
+                metric: 200,
+            },
+        ]
+    );
+
+    // Test output without explicit metric (defaults to 0)
+    let no_metric_output = "default via 192.168.1.1 dev eth0\n";
+    let candidates_no_m = InterfaceController::parse_ip_route_default_output(no_metric_output);
+    assert_eq!(
+        candidates_no_m,
+        vec![RouteCandidate {
+            interface: "eth0".to_string(),
+            metric: 0,
+        }]
     );
 }
 
@@ -42,7 +134,7 @@ lo\t00000000\t00000000\t0003\t0\t0\t0\t00000000\t0\t0\t0
 eth0\t00000000\t011ED80A\t0003\t0\t0\t100\t00000000\t0\t0\t0
 ";
 
-    let defaults = InterfaceController::parse_default_routes(route_table);
+    let defaults = InterfaceController::parse_default_route_interfaces(route_table);
     assert_eq!(defaults, vec!["eth0"], "Loopback must be filtered out");
 }
 
@@ -56,7 +148,7 @@ eth_down\t00000000\t011ED80A\t0002\t0\t0\t50\t00000000\t0\t0\t0
 eth_up\t00000000\t011ED80A\t0003\t0\t0\t100\t00000000\t0\t0\t0
 ";
 
-    let defaults = InterfaceController::parse_default_routes(route_table);
+    let defaults = InterfaceController::parse_default_route_interfaces(route_table);
     assert_eq!(
         defaults,
         vec!["eth_up"],
@@ -69,6 +161,8 @@ fn test_route_table_parser_empty_and_corrupt() {
     assert!(InterfaceController::parse_default_routes("").is_empty());
     assert!(InterfaceController::parse_default_routes("Header line only\n").is_empty());
     assert!(InterfaceController::parse_default_routes("gibberish not enough columns").is_empty());
+
+    assert!(InterfaceController::resolve_authoritative_candidate(&[]).is_err());
 }
 
 #[test]
@@ -117,6 +211,66 @@ fn test_sysfs_baseline_capture_mock_down() {
 }
 
 #[test]
+fn test_sysfs_baseline_capture_rejects_loopback() {
+    let temp = tempdir().expect("create temp dir");
+    let iface_dir = temp.path().join("lo");
+    fs::create_dir_all(&iface_dir).expect("create iface dir");
+    fs::write(iface_dir.join("address"), "00:00:00:00:00:00\n").unwrap();
+    fs::write(iface_dir.join("flags"), "0x1003\n").unwrap();
+
+    let res = InterfaceController::capture_baseline_from_sysfs(temp.path(), "lo");
+    assert!(
+        matches!(res, Err(UmbraError::InterfaceNotFound(_))),
+        "Loopback must be rejected as an egress interface"
+    );
+}
+
+#[test]
+fn test_sysfs_baseline_capture_rejects_all_zeros_and_multicast_mac() {
+    let temp = tempdir().expect("create temp dir");
+    let iface_dir = temp.path().join("tun0");
+    fs::create_dir_all(&iface_dir).expect("create iface dir");
+    fs::write(iface_dir.join("address"), "00:00:00:00:00:00\n").unwrap();
+    fs::write(iface_dir.join("flags"), "0x1003\n").unwrap();
+
+    let res = InterfaceController::capture_baseline_from_sysfs(temp.path(), "tun0");
+    assert!(
+        matches!(res, Err(UmbraError::InvalidMacAddress(_))),
+        "All-zero MAC must be rejected"
+    );
+
+    // Multicast MAC
+    fs::write(iface_dir.join("address"), "01:00:5e:00:00:01\n").unwrap();
+    let res = InterfaceController::capture_baseline_from_sysfs(temp.path(), "tun0");
+    assert!(
+        matches!(res, Err(UmbraError::InvalidMacAddress(_))),
+        "Multicast MAC must be rejected"
+    );
+}
+
+#[test]
+fn test_apply_and_restore_reject_loopback() {
+    let valid_mac = MacAddress::generate_random().unwrap();
+    let res = InterfaceController::apply_mac("lo", valid_mac);
+    assert!(matches!(res, Err(UmbraError::MacChangeFailed { .. })));
+
+    let baseline_lo = InterfaceBaseline {
+        name: "lo".to_string(),
+        original_mac: valid_mac,
+        was_up: true,
+    };
+    let res = InterfaceController::restore_baseline(&baseline_lo);
+    assert!(matches!(res, Err(UmbraError::MacRestoreFailed { .. })));
+}
+
+#[test]
+fn test_apply_mac_rejects_non_randomized_mac() {
+    let invalid_mac = MacAddress::new([0, 0, 0, 0, 0, 0]);
+    let res = InterfaceController::apply_mac("eth0", invalid_mac);
+    assert!(matches!(res, Err(UmbraError::InvalidMacAddress(_))));
+}
+
+#[test]
 fn test_sysfs_baseline_capture_nonexistent_interface() {
     let temp = tempdir().expect("create temp dir");
     let res = InterfaceController::capture_baseline_from_sysfs(temp.path(), "eth99");
@@ -146,7 +300,10 @@ fn test_sysfs_flags_invalid_hex() {
     fs::write(iface_dir.join("flags"), "not_hex_flag\n").expect("write bad flags");
 
     let res = InterfaceController::is_administratively_up_from_sysfs(temp.path(), "eth0");
-    assert!(matches!(res, Err(UmbraError::InterfaceNotFound(_))));
+    assert!(matches!(
+        res,
+        Err(UmbraError::InterfaceStateChangeFailed { .. })
+    ));
 }
 
 #[test]

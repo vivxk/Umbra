@@ -270,3 +270,143 @@ fn test_firewall_verify_live_fails_if_chain_missing() {
     // Teardown the table
     FirewallController::teardown(&config.table_family, &config.table_name).expect("teardown");
 }
+
+#[test]
+fn test_firewall_traffic_redirection_and_blocking_in_netns() {
+    if !common::is_in_isolated_netns() {
+        let netns = common::IsolatedNetns::new("umbra_fw_traf").expect("netns isolation required");
+        netns.run_test("test_firewall_traffic_redirection_and_blocking_in_netns");
+        return;
+    }
+
+    // 1. Setup isolated dummy egress interface with default route
+    let dummy_iface = "dummy_egress";
+    let _ = Command::new("ip")
+        .args(["link", "add", "dev", dummy_iface, "type", "dummy"])
+        .status();
+    let _ = Command::new("ip")
+        .args(["link", "set", "dev", dummy_iface, "up"])
+        .status();
+    let _ = Command::new("ip")
+        .args(["addr", "add", "192.0.2.2/24", "dev", dummy_iface])
+        .status();
+    let _ = Command::new("ip")
+        .args([
+            "route",
+            "add",
+            "default",
+            "via",
+            "192.0.2.1",
+            "dev",
+            dummy_iface,
+        ])
+        .status();
+    let _ = Command::new("ip")
+        .args([
+            "neigh",
+            "add",
+            "192.0.2.1",
+            "lladdr",
+            "02:00:00:00:00:01",
+            "dev",
+            dummy_iface,
+            "nud",
+            "permanent",
+        ])
+        .status();
+
+    // Configure test firewall with mock ports:
+    // Process running in netns has UID 0 (root), so set tor_uid to 9999 so current process is treated as an application
+    let config = FirewallConfig {
+        table_name: NFT_TABLE_NAME.to_string(),
+        table_family: NFT_TABLE_FAMILY.to_string(),
+        tor_uid: 9999,
+        tor_transport_port: 19040,
+        tor_dns_port: 15353,
+        tor_control_port: 19051,
+        egress_interface: dummy_iface.to_string(),
+        activation_id: "test_traffic_act".to_string(),
+    };
+
+    // Install Umbra firewall
+    FirewallController::install(&config).expect("install firewall ruleset");
+
+    // --- Test A: Application TCP Redirection to Tor TransPort ---
+    let (tx_transport, rx_transport) = std::sync::mpsc::channel();
+    let transport_handle = std::thread::spawn(move || {
+        let listener = std::net::TcpListener::bind("127.0.0.1:19040")
+            .expect("bind mock tor transport listener");
+        tx_transport.send(()).expect("signal listener ready");
+        let (stream, _addr) = listener.accept().expect("accept redirected connection");
+        stream
+    });
+    rx_transport
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("mock transport listener ready");
+
+    // Application attempts connection to an external address (192.0.2.100:80)
+    let client_stream = std::net::TcpStream::connect("192.0.2.100:80")
+        .expect("Client TCP connect must succeed because it is redirected to 127.0.0.1:19040");
+
+    let server_stream = transport_handle
+        .join()
+        .expect("Mock TransPort on port 19040 must receive the redirected TCP connection");
+    drop(client_stream);
+    drop(server_stream);
+
+    // --- Test B: UDP DNS Redirection to Tor DNSPort ---
+    let dns_listener =
+        std::net::UdpSocket::bind("127.0.0.1:15353").expect("bind mock tor dnsport listener");
+    dns_listener
+        .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+        .expect("set read timeout");
+
+    let udp_client = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind client udp");
+    udp_client
+        .send_to(b"DNS_TEST_QUERY", "8.8.8.8:53")
+        .expect("send udp dns packet");
+
+    let mut buf = [0u8; 64];
+    let (bytes_read, _peer) = dns_listener
+        .recv_from(&mut buf)
+        .expect("Mock DNSPort must receive redirected UDP DNS packet");
+    assert_eq!(&buf[..bytes_read], b"DNS_TEST_QUERY");
+    drop(dns_listener);
+    drop(udp_client);
+
+    // --- Test C: TCP DNS Leak Prevention (rejected with TCP reset, never sent to TransPort) ---
+    let tcp_dns_res = std::net::TcpStream::connect_timeout(
+        &"8.8.8.8:53".parse().unwrap(),
+        std::time::Duration::from_millis(500),
+    );
+    assert!(
+        tcp_dns_res.is_err(),
+        "TCP DNS to port 53 must be rejected with TCP reset immediately"
+    );
+
+    // --- Test D: Loopback Communications Preserved ---
+    let (tx_local, rx_local) = std::sync::mpsc::channel();
+    let local_handle = std::thread::spawn(move || {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:18888").expect("bind local service listener");
+        tx_local.send(()).expect("signal local ready");
+        let (stream, _) = listener.accept().expect("accept local connection");
+        stream
+    });
+    rx_local
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("local listener ready");
+    let local_client = std::net::TcpStream::connect("127.0.0.1:18888")
+        .expect("Local loopback communication must be preserved");
+    let local_server = local_handle.join().expect("join local server");
+    drop(local_client);
+    drop(local_server);
+
+    // Teardown firewall
+    FirewallController::teardown(&config.table_family, &config.table_name).expect("teardown");
+
+    // Clean up dummy interface
+    let _ = Command::new("ip")
+        .args(["link", "del", "dev", dummy_iface])
+        .status();
+}

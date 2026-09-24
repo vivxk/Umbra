@@ -15,14 +15,21 @@ pub struct InterfaceBaseline {
     pub was_up: bool,
 }
 
+/// Candidate default route discovered from system routing tables
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteCandidate {
+    pub interface: String,
+    pub metric: i32,
+}
+
 /// Interface controller providing safe inspection and mutation
 pub struct InterfaceController;
 
 impl InterfaceController {
-    /// Parses /proc/net/route content and returns candidate default route interfaces ordered by metric (lowest metric first).
+    /// Parses /proc/net/route content and returns candidate default routes.
     /// Filters out loopback ("lo") and routes without the RTF_UP flag.
-    pub fn parse_default_routes(route_content: &str) -> Vec<String> {
-        let mut candidates: Vec<(i32, String)> = Vec::new();
+    pub fn parse_default_routes(route_content: &str) -> Vec<RouteCandidate> {
+        let mut candidates: Vec<RouteCandidate> = Vec::new();
 
         // Format of /proc/net/route:
         // Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT
@@ -40,25 +47,104 @@ impl InterfaceController {
                     // RTF_UP is 0x0001
                     if (flags & 0x0001) != 0 {
                         let metric = metric_str.parse::<i32>().unwrap_or(0);
-                        candidates.push((metric, iface.to_string()));
+                        candidates.push(RouteCandidate {
+                            interface: iface.to_string(),
+                            metric,
+                        });
                     }
                 }
             }
         }
 
-        // Sort by metric ascending (lowest metric has highest routing priority)
-        candidates.sort_by_key(|&(metric, _)| metric);
-        candidates.into_iter().map(|(_, iface)| iface).collect()
+        candidates
     }
 
-    /// Resolves the authoritative default egress interface via /proc/net/route (or ip route fallback)
-    pub fn detect_default_egress() -> Result<String> {
+    /// Extracts unique interface names ordered by metric ascending (lowest metric first).
+    pub fn parse_default_route_interfaces(route_content: &str) -> Vec<String> {
+        let mut candidates = Self::parse_default_routes(route_content);
+        candidates.sort_by_key(|c| c.metric);
+        let mut ifaces: Vec<String> = Vec::new();
+        for c in candidates {
+            if !ifaces.contains(&c.interface) {
+                ifaces.push(c.interface);
+            }
+        }
+        ifaces
+    }
+
+    /// Parses stdout from `ip route show default` into route candidates
+    pub fn parse_ip_route_default_output(stdout: &str) -> Vec<RouteCandidate> {
+        let mut candidates = Vec::new();
+        for line in stdout.lines() {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            if let Some(pos) = tokens.iter().position(|&x| x == "dev") {
+                if let Some(&dev_name) = tokens.get(pos + 1) {
+                    if dev_name != "lo" {
+                        let metric = if let Some(m_pos) = tokens.iter().position(|&x| x == "metric")
+                        {
+                            tokens
+                                .get(m_pos + 1)
+                                .and_then(|m| m.parse::<i32>().ok())
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        candidates.push(RouteCandidate {
+                            interface: dev_name.to_string(),
+                            metric,
+                        });
+                    }
+                }
+            }
+        }
+        candidates
+    }
+
+    /// Resolves the single authoritative egress interface from candidates.
+    /// Per Section 93: If multiple distinct interfaces share the lowest metric,
+    /// egress is ambiguous and we must fail safely rather than arbitrarily choosing.
+    pub fn resolve_authoritative_candidate(candidates: &[RouteCandidate]) -> Result<String> {
+        if candidates.is_empty() {
+            return Err(UmbraError::EgressResolutionFailed(
+                "no active default route discovered".to_string(),
+            ));
+        }
+
+        let min_metric = candidates
+            .iter()
+            .map(|c| c.metric)
+            .min()
+            .expect("candidates non-empty");
+
+        let mut min_interfaces: Vec<&str> = candidates
+            .iter()
+            .filter(|c| c.metric == min_metric)
+            .map(|c| c.interface.as_str())
+            .collect();
+        min_interfaces.sort_unstable();
+        min_interfaces.dedup();
+
+        if min_interfaces.len() > 1 {
+            return Err(UmbraError::EgressResolutionFailed(format!(
+                "ambiguous default routes: multiple interfaces ({:?}) share lowest metric {}",
+                min_interfaces, min_metric
+            )));
+        }
+
+        Ok(min_interfaces[0].to_string())
+    }
+
+    /// Resolves the authoritative default egress interface against a given sysfs root
+    pub fn detect_default_egress_with_sysfs(sysfs_root: &Path) -> Result<String> {
         if let Ok(route_content) = fs::read_to_string("/proc/net/route") {
             let candidates = Self::parse_default_routes(&route_content);
-            for iface in candidates {
-                if Path::new("/sys/class/net").join(&iface).exists() {
-                    return Ok(iface);
-                }
+            let valid_candidates: Vec<RouteCandidate> = candidates
+                .into_iter()
+                .filter(|c| sysfs_root.join(&c.interface).exists())
+                .collect();
+
+            if !valid_candidates.is_empty() {
+                return Self::resolve_authoritative_candidate(&valid_candidates);
             }
         }
 
@@ -72,13 +158,14 @@ impl InterfaceController {
 
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let parts: Vec<&str> = stdout.split_whitespace().collect();
-            if let Some(pos) = parts.iter().position(|&x| x == "dev") {
-                if let Some(dev_name) = parts.get(pos + 1) {
-                    if *dev_name != "lo" && Path::new("/sys/class/net").join(dev_name).exists() {
-                        return Ok(dev_name.to_string());
-                    }
-                }
+            let candidates = Self::parse_ip_route_default_output(&stdout);
+            let valid_candidates: Vec<RouteCandidate> = candidates
+                .into_iter()
+                .filter(|c| sysfs_root.join(&c.interface).exists())
+                .collect();
+
+            if !valid_candidates.is_empty() {
+                return Self::resolve_authoritative_candidate(&valid_candidates);
             }
         }
 
@@ -87,17 +174,40 @@ impl InterfaceController {
         ))
     }
 
-    /// Captures the baseline of an interface from a specified sysfs net directory
+    /// Resolves the authoritative default egress interface via /proc/net/route (or ip route fallback)
+    pub fn detect_default_egress() -> Result<String> {
+        Self::detect_default_egress_with_sysfs(Path::new("/sys/class/net"))
+    }
+
+    /// Captures the baseline of an interface from a specified sysfs net directory.
+    /// Loopback ('lo') and interfaces with all-zero or multicast MACs are rejected.
     pub fn capture_baseline_from_sysfs(
         sysfs_root: &Path,
         iface: &str,
     ) -> Result<InterfaceBaseline> {
+        if iface == "lo" {
+            return Err(UmbraError::InterfaceNotFound(
+                "loopback interface 'lo' cannot be used as egress".to_string(),
+            ));
+        }
+
         let sys_path = sysfs_root.join(iface);
         if !sys_path.exists() {
             return Err(UmbraError::InterfaceNotFound(iface.to_string()));
         }
 
         let original_mac = Self::read_mac_from_sysfs(sysfs_root, iface)?;
+        if original_mac.is_all_zeros() {
+            return Err(UmbraError::InvalidMacAddress(format!(
+                "interface '{iface}' has all-zero MAC address, cannot be safely randomized"
+            )));
+        }
+        if original_mac.is_multicast() {
+            return Err(UmbraError::InvalidMacAddress(format!(
+                "interface '{iface}' has multicast MAC address, cannot be safely randomized"
+            )));
+        }
+
         let was_up = Self::is_administratively_up_from_sysfs(sysfs_root, iface)?;
 
         Ok(InterfaceBaseline {
@@ -142,7 +252,10 @@ impl InterfaceController {
 
         let hex_str = content.trim().trim_start_matches("0x");
         let flags = u32::from_str_radix(hex_str, 16).map_err(|_| {
-            UmbraError::InterfaceNotFound(format!("invalid hex flags in '{content}'"))
+            UmbraError::InterfaceStateChangeFailed {
+                interface: iface.to_string(),
+                reason: format!("invalid hex flags in '{content}'"),
+            }
         })?;
 
         // 0x1 is IFF_UP
@@ -177,11 +290,25 @@ impl InterfaceController {
     }
 
     /// Changes the interface MAC address with verification:
-    /// 1. Brings interface down if up
-    /// 2. Sets new MAC
-    /// 3. Restores administrative state
-    /// 4. Verifies live MAC and admin state match
+    /// 1. Rejects loopback 'lo' and non-randomized MACs
+    /// 2. Brings interface down if up
+    /// 3. Sets new MAC
+    /// 4. Restores original administrative state
+    /// 5. Verifies live MAC and admin state match
     pub fn apply_mac(iface: &str, new_mac: MacAddress) -> Result<()> {
+        if iface == "lo" {
+            return Err(UmbraError::MacChangeFailed {
+                interface: iface.to_string(),
+                reason: "cannot change MAC on loopback interface 'lo'".to_string(),
+            });
+        }
+
+        if !new_mac.is_valid_randomized() {
+            return Err(UmbraError::InvalidMacAddress(format!(
+                "MAC '{new_mac}' is not a valid locally administered unicast MAC"
+            )));
+        }
+
         let was_up = Self::is_administratively_up(iface)?;
 
         if was_up {
@@ -203,10 +330,12 @@ impl InterfaceController {
             None
         };
 
-        // Always restore original administrative state
-        if was_up {
-            let _ = Self::set_admin_state(iface, true);
-        }
+        // Always attempt to restore original administrative state
+        let admin_restore_res = if was_up {
+            Self::set_admin_state(iface, true)
+        } else {
+            Ok(())
+        };
 
         if let Some(err) = change_err {
             return Err(UmbraError::MacChangeFailed {
@@ -214,6 +343,8 @@ impl InterfaceController {
                 reason: err,
             });
         }
+
+        admin_restore_res?;
 
         // Live verification of MAC
         let live_mac = Self::read_mac(iface)?;
@@ -241,6 +372,13 @@ impl InterfaceController {
 
     /// Restores the original baseline MAC and admin state with verification
     pub fn restore_baseline(baseline: &InterfaceBaseline) -> Result<()> {
+        if baseline.name == "lo" {
+            return Err(UmbraError::MacRestoreFailed {
+                interface: baseline.name.clone(),
+                reason: "cannot restore MAC on loopback interface 'lo'".to_string(),
+            });
+        }
+
         let was_up = Self::is_administratively_up(&baseline.name)?;
 
         if was_up {
@@ -270,7 +408,7 @@ impl InterfaceController {
         };
 
         // Restore administrative state to baseline
-        let _ = Self::set_admin_state(&baseline.name, baseline.was_up);
+        let admin_restore_res = Self::set_admin_state(&baseline.name, baseline.was_up);
 
         if let Some(err) = restore_err {
             return Err(UmbraError::MacRestoreFailed {
@@ -278,6 +416,8 @@ impl InterfaceController {
                 reason: err,
             });
         }
+
+        admin_restore_res?;
 
         // Live verification of MAC
         let live_mac = Self::read_mac(&baseline.name)?;

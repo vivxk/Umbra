@@ -1,7 +1,5 @@
-#![allow(dead_code)]
-
 use std::env;
-use std::process::{Command, Output};
+use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(1);
@@ -105,49 +103,6 @@ impl IsolatedNetns {
                 "Test '{test_name}' failed inside isolated network namespace '{}'.\nStdout:\n{}\nStderr:\n{}",
                 self.name, stdout, stderr
             );
-        }
-    }
-
-    /// Adds a dummy interface to this network namespace
-    pub fn add_dummy_interface(&self, iface_name: &str, mac: Option<&str>, up: bool) -> Output {
-        match &self.backend {
-            IsolationBackend::IpNetns(name) => {
-                let _ = Command::new("sudo")
-                    .args([
-                        "-n", "ip", "netns", "exec", name, "ip", "link", "add", "dev", iface_name,
-                        "type", "dummy",
-                    ])
-                    .output();
-
-                if let Some(mac_str) = mac {
-                    let _ = Command::new("sudo")
-                        .args([
-                            "-n", "ip", "netns", "exec", name, "ip", "link", "set", "dev",
-                            iface_name, "address", mac_str,
-                        ])
-                        .output();
-                }
-
-                if up {
-                    let _ = Command::new("sudo")
-                        .args([
-                            "-n", "ip", "netns", "exec", name, "ip", "link", "set", "dev",
-                            iface_name, "up",
-                        ])
-                        .output();
-                }
-
-                Command::new("sudo")
-                    .args([
-                        "-n", "ip", "netns", "exec", name, "ip", "link", "show", "dev", iface_name,
-                    ])
-                    .output()
-                    .expect("ip link show failed")
-            }
-            IsolationBackend::Unshare => Command::new("unshare")
-                .args(["-r", "-n", "ip", "link"])
-                .output()
-                .expect("unshare ip link"),
         }
     }
 }

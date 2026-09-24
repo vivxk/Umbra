@@ -40,30 +40,40 @@ impl Default for FirewallConfig {
 pub struct FirewallController;
 
 impl FirewallController {
-    /// Generates the complete, atomic nftables ruleset specification
+    /// Generates the complete, atomic nftables ruleset specification.
+    /// Invariants enforced:
+    /// 1. Tor UID is exempt from NAT redirection and filter drops.
+    /// 2. External IPv6 is completely dropped (Section 23 Strategy B) and never redirected.
+    /// 3. UDP DNS (dport 53) is intercepted and redirected to Tor DNSPort.
+    /// 4. TCP DNS (dport 53) is rejected with TCP reset (never redirected to TransPort per Section 20).
+    /// 5. Non-Tor application TCP is redirected to Tor TransPort.
+    /// 6. Arbitrary UDP and QUIC are blocked fail-closed.
+    /// 7. Loopback IPC communications are preserved.
     pub fn generate_ruleset(config: &FirewallConfig) -> String {
         format!(
             r#"table {family} {table} {{
     chain output_nat {{
         type nat hook output priority dstnat; policy accept;
         skuid {tor_uid} return comment "{marker}"
+        meta nfproto ipv6 return comment "{marker}"
         oif "lo" return comment "{marker}"
-        udp dport 53 redirect to :{tor_dns_port} comment "{marker}"
         ip daddr 127.0.0.0/8 return comment "{marker}"
+        udp dport 53 redirect to :{tor_dns_port} comment "{marker}"
+        tcp dport 53 return comment "{marker}"
         tcp dport != {tor_transport_port} redirect to :{tor_transport_port} comment "{marker}"
     }}
 
     chain output_filter {{
         type filter hook output priority filter; policy drop;
-        oif "lo" accept comment "{marker}"
         ct state established,related accept comment "{marker}"
         skuid {tor_uid} accept comment "{marker}"
+        tcp dport 53 reject with tcp reset comment "{marker}"
+        ip6 daddr != ::1 drop comment "{marker}"
         ip daddr 127.0.0.1 tcp dport {tor_transport_port} accept comment "{marker}"
         ip daddr 127.0.0.1 udp dport {tor_dns_port} accept comment "{marker}"
         ip daddr 127.0.0.1 tcp dport {tor_control_port} accept comment "{marker}"
-        tcp dport 53 reject with tcp reset comment "{marker}"
+        oif "lo" accept comment "{marker}"
         meta l4proto udp drop comment "{marker}"
-        ip6 daddr != ::1 drop comment "{marker}"
     }}
 }}
 "#,
@@ -77,8 +87,10 @@ impl FirewallController {
         )
     }
 
-    /// Verifies the syntax of the generated ruleset without applying it (nft -c -f -)
+    /// Verifies the syntax of the generated ruleset without applying it (nft -c -f -).
+    /// Normalizes CRLF line terminators to LF to avoid nft syntax errors.
     pub fn check_syntax(ruleset: &str) -> Result<()> {
+        let normalized = ruleset.replace("\r\n", "\n");
         let run_check =
             |use_unshare: bool| -> std::result::Result<std::process::Output, std::io::Error> {
                 let mut cmd = if use_unshare {
@@ -98,7 +110,7 @@ impl FirewallController {
                     .spawn()?;
 
                 if let Some(mut stdin) = child.stdin.take() {
-                    stdin.write_all(ruleset.as_bytes())?;
+                    stdin.write_all(normalized.as_bytes())?;
                 }
 
                 child.wait_with_output()
@@ -143,9 +155,10 @@ impl FirewallController {
     /// Atomically applies the ruleset to the kernel via nft -f -
     pub fn install(config: &FirewallConfig) -> Result<()> {
         let ruleset = Self::generate_ruleset(config);
+        let normalized = ruleset.replace("\r\n", "\n");
 
         // Pre-validate syntax before kernel application
-        Self::check_syntax(&ruleset)?;
+        Self::check_syntax(&normalized)?;
 
         let mut child = Command::new("nft")
             .args(["-f", "-"])
@@ -156,7 +169,7 @@ impl FirewallController {
             .map_err(|e| UmbraError::FirewallInstallFailed(format!("failed to spawn nft: {e}")))?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(ruleset.as_bytes()).map_err(|e| {
+            stdin.write_all(normalized.as_bytes()).map_err(|e| {
                 UmbraError::FirewallInstallFailed(format!("failed to write ruleset: {e}"))
             })?;
         }
@@ -242,7 +255,7 @@ impl FirewallController {
         })
     }
 
-    /// Verifies live enforcement: table exists, ownership authenticated, required chains active
+    /// Verifies live enforcement: table exists, ownership authenticated, required chains and security rules active
     pub fn verify_live(config: &FirewallConfig) -> Result<()> {
         if !Self::table_exists(&config.table_family, &config.table_name)? {
             return Err(UmbraError::FirewallVerificationFailed(format!(
@@ -270,6 +283,21 @@ impl FirewallController {
         if !ruleset_str.contains("chain output_filter") {
             return Err(UmbraError::FirewallVerificationFailed(
                 "live ruleset missing chain output_filter".to_string(),
+            ));
+        }
+        if !ruleset_str.contains("tcp dport 53 reject with tcp reset") {
+            return Err(UmbraError::FirewallVerificationFailed(
+                "live ruleset missing tcp dport 53 reset rule".to_string(),
+            ));
+        }
+        if !ruleset_str.contains("meta l4proto udp drop") {
+            return Err(UmbraError::FirewallVerificationFailed(
+                "live ruleset missing udp drop rule".to_string(),
+            ));
+        }
+        if !ruleset_str.contains("ip6 daddr != ::1 drop") {
+            return Err(UmbraError::FirewallVerificationFailed(
+                "live ruleset missing ipv6 drop rule".to_string(),
             ));
         }
 

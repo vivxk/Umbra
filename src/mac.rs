@@ -24,14 +24,24 @@ impl MacAddress {
         (self.0[0] & 0x01) == 0
     }
 
+    /// Checks if the MAC address is multicast (multicast bit, LSB of octet 0, is 1)
+    pub fn is_multicast(&self) -> bool {
+        !self.is_unicast()
+    }
+
     /// Checks if the MAC address is locally administered (U/L bit, bit 1 of octet 0, is 1)
     pub fn is_locally_administered(&self) -> bool {
         (self.0[0] & 0x02) == 0x02
     }
 
+    /// Checks if the MAC address is all zeroes (00:00:00:00:00:00)
+    pub fn is_all_zeros(&self) -> bool {
+        self.0 == [0; 6]
+    }
+
     /// Checks if the MAC address is valid for randomization (unicast, locally administered, not all zero)
     pub fn is_valid_randomized(&self) -> bool {
-        self.is_unicast() && self.is_locally_administered() && self.0 != [0; 6]
+        self.is_unicast() && self.is_locally_administered() && !self.is_all_zeros()
     }
 
     /// Generates a cryptographically random, unicast, locally administered MAC address.

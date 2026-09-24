@@ -27,16 +27,20 @@ fn test_firewall_rule_generation() {
     assert!(ruleset.contains("skuid 122 return"));
     assert!(ruleset.contains("skuid 122 accept"));
 
+    // IPv6 external leak protection
+    assert!(ruleset.contains("meta nfproto ipv6 return"));
+    assert!(ruleset.contains("ip6 daddr != ::1 drop"));
+
     // Redirections
     assert!(ruleset.contains("udp dport 53 redirect to :5353"));
     assert!(ruleset.contains("tcp dport != 9040 redirect to :9040"));
 
-    // DNS leak prevention (TCP reset)
+    // DNS leak prevention (TCP reset, never sent to TransPort)
+    assert!(ruleset.contains("tcp dport 53 return"));
     assert!(ruleset.contains("tcp dport 53 reject with tcp reset"));
 
     // Fail-closed drops
     assert!(ruleset.contains("meta l4proto udp drop"));
-    assert!(ruleset.contains("ip6 daddr != ::1 drop"));
 }
 
 #[test]
