@@ -1,0 +1,18 @@
+[Unit]
+Description=Umbra Privacy Network Boundary Boot Service
+Documentation=https://github.com/umbra/umbra
+After=network.target tor.service
+Wants=tor.service
+Before=network-online.target
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/umbra start
+ExecStop=/usr/bin/umbra stop
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
