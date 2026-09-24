@@ -27,7 +27,7 @@ Umbra is a lightweight Linux utility written in safe Rust that enforces transpar
 - **Kernel-Enforced Security**: All routing policies reside in Linux `nftables` (`table inet umbra`). Process termination, crashes, or signals cannot disrupt active protection.
 - **Small & Auditable**: Clean-room implementation in safe Rust with minimal external dependencies.
 - **Minimal Persistent Footprint**: Runtime session state is stored ephemerally in `/run/umbra/` (tmpfs) and is cleared on reboot; no long-lived configuration databases or background daemons.
-- **Ownership Verification**: All firewall rules, tables, chains, and Tor configuration fragments are cryptographically and textually tagged (`umbra-managed`). Foreign firewall tables, host DNS configurations, and unrelated network rules remain completely untouched.
+- **Ownership Verification**: All firewall rules, tables, chains, and Tor configuration fragments are explicitly tagged and ownership-verified (`umbra-managed`). Foreign firewall tables, host DNS configurations, and unrelated network rules remain completely untouched.
 - **Zero Telemetry**: No outbound diagnostic requests, public IP query pings, or telemetry.
 
 ---
@@ -157,10 +157,10 @@ umbra version
 
 ---
 
-## Systemd Boot-Enforced Mode
-
-For systems requiring boot-time fail-closed protection, Umbra provides `umbra-boot.service`:
-
+## Boot-Time Automatic Activation
+ 
+For systems requiring automatic activation upon system startup, Umbra provides `umbra-boot.service`:
+ 
 ```bash
 # Enable Umbra to start before network-online.target on boot
 sudo systemctl enable umbra-boot.service
@@ -173,6 +173,20 @@ sudo systemctl status umbra-boot.service
 ```
 
 `umbra-boot.service` is a `oneshot` unit (`RemainAfterExit=yes`) ensuring that no background daemon is kept running. The Linux kernel nftables ruleset maintains all enforcement. In accordance with Umbra security invariants, failure of the boot unit never defaults to an open network.
+
+> [!NOTE]
+> `umbra-boot.service` provides automatic activation during boot ordering. There may be a period during early boot before Umbra and Tor have initialized where the network boundary is not yet active. Applications requiring strict pre-network isolation should isolate network namespaces.
+
+---
+
+## Explicit Privacy Boundaries & Scope
+
+Umbra acts strictly as an operating system network boundary. In accordance with transparent privacy routing principles, Umbra does **not** protect against:
+- **Browser Fingerprinting**: Canvas/WebGL/audio fingerprinting, TLS client hello fingerprinting, or user-agent profiling (use Tor Browser for web anonymity).
+- **Application Identifiers**: User accounts, login tokens, cookies, or unique hardware identifiers transmitted by client applications.
+- **Traffic Correlation**: Global adversary statistical timing attacks across entry and exit nodes.
+- **Endpoint Compromise**: Malware, keyloggers, rootkits, or physical memory extraction on the host machine.
+- **OS Audit Logs**: Local system journal logs, syslog entries, or bash command history.
 
 ---
 

@@ -38,11 +38,17 @@ impl fmt::Display for UmbraStatus {
     }
 }
 
+fn default_status() -> UmbraStatus {
+    UmbraStatus::Active
+}
+
 /// Minimal volatile state stored in /run/umbra/active.json
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveState {
     pub version: u32,
     pub activation_id: String,
+    #[serde(default = "default_status")]
+    pub status: UmbraStatus,
     pub interface: String,
     pub original_mac: String,
     pub randomized_mac: String,
@@ -67,6 +73,33 @@ impl ActiveState {
         tor_dns_port: u16,
         firewall_identity: String,
     ) -> Self {
+        Self::new_with_status(
+            activation_id,
+            interface,
+            original_mac,
+            randomized_mac,
+            interface_was_up,
+            tor_uid,
+            tor_transport_port,
+            tor_dns_port,
+            firewall_identity,
+            UmbraStatus::Active,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_status(
+        activation_id: String,
+        interface: String,
+        original_mac: String,
+        randomized_mac: String,
+        interface_was_up: bool,
+        tor_uid: u32,
+        tor_transport_port: u16,
+        tor_dns_port: u16,
+        firewall_identity: String,
+        status: UmbraStatus,
+    ) -> Self {
         let created_at_epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -75,6 +108,7 @@ impl ActiveState {
         Self {
             version: 1,
             activation_id,
+            status,
             interface,
             original_mac,
             randomized_mac,
@@ -94,6 +128,15 @@ impl ActiveState {
                 "unsupported state version {}",
                 self.version
             )));
+        }
+        match self.status {
+            UmbraStatus::Starting | UmbraStatus::Active => {}
+            _ => {
+                return Err(UmbraError::RuntimeStateCorrupt(format!(
+                    "invalid lifecycle status in active state: {}",
+                    self.status
+                )));
+            }
         }
         if self.activation_id.trim().is_empty() {
             return Err(UmbraError::RuntimeStateCorrupt(

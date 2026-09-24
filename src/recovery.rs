@@ -116,8 +116,12 @@ impl RecoveryController {
             }
         };
 
-        // 1. Teardown Firewall with strict ownership authentication
-        FirewallController::teardown(&options.table_family, &options.table_name)?;
+        // 1. Teardown Firewall with strict ownership authentication and activation ID check
+        FirewallController::teardown_with_id(
+            &options.table_family,
+            &options.table_name,
+            Some(&state.activation_id),
+        )?;
 
         // 2. Restore Interface Baseline (MAC and administrative UP/DOWN state)
         let orig_mac = MacAddress::parse(&state.original_mac)?;
@@ -300,16 +304,16 @@ impl RecoveryController {
                         original_mac: orig_mac,
                         was_up: state.interface_was_up,
                     };
-                    match InterfaceController::restore_baseline(&baseline) {
-                        Ok(_) => actions.push(format!(
-                            "Restored interface {} to original MAC {}",
-                            state.interface, state.original_mac
-                        )),
-                        Err(e) => actions.push(format!(
-                            "Warning: failed to restore interface {}: {e}",
+                    InterfaceController::restore_baseline(&baseline).map_err(|e| {
+                        UmbraError::RecoveryUncertain(format!(
+                            "Force recovery failed to restore interface {}: {e}. Runtime state preserved.",
                             state.interface
-                        )),
-                    }
+                        ))
+                    })?;
+                    actions.push(format!(
+                        "Restored interface {} to original MAC {}",
+                        state.interface, state.original_mac
+                    ));
                 } else {
                     actions.push(format!(
                         "Warning: state file had unparseable MAC '{}'; hardware MAC not restored",
@@ -326,16 +330,16 @@ impl RecoveryController {
             Err(e) => {
                 // Best-effort: attempt to salvage baseline from corrupt state file
                 if let Some(salvaged) = try_salvage_baseline_from_corrupt_file(state_path) {
-                    match InterfaceController::restore_baseline(&salvaged) {
-                        Ok(_) => actions.push(format!(
-                            "Best-effort restoration: salvaged baseline from corrupt state file and restored interface {} to original MAC {}",
-                            salvaged.name, salvaged.original_mac
-                        )),
-                        Err(err) => actions.push(format!(
-                            "Warning: salvaged baseline for interface {} from corrupt state file, but restoration failed: {err}",
+                    InterfaceController::restore_baseline(&salvaged).map_err(|err| {
+                        UmbraError::RecoveryUncertain(format!(
+                            "Force recovery salvaged baseline for interface {} from corrupt state file, but restoration failed: {err}. Runtime state preserved.",
                             salvaged.name
-                        )),
-                    }
+                        ))
+                    })?;
+                    actions.push(format!(
+                        "Best-effort restoration: salvaged baseline from corrupt state file and restored interface {} to original MAC {}",
+                        salvaged.name, salvaged.original_mac
+                    ));
                 } else {
                     actions.push(format!(
                         "Warning: runtime state file was corrupt ({e}); baseline MAC could not be salvaged or restored. Please verify network manager or re-plug interface if MAC was changed."
@@ -344,7 +348,7 @@ impl RecoveryController {
             }
         }
 
-        // 3. Remove corrupt or existing state file
+        // 3. Remove corrupt or existing state file ONLY after successful restoration
         if state_path.exists() {
             let _ = ActiveState::remove_from_path(state_path);
             actions.push(format!(

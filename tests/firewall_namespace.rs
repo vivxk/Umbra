@@ -231,7 +231,7 @@ fn test_firewall_verify_live_fails_if_chain_missing() {
 
     let config = get_test_config();
 
-    // Create a table with ownership marker but missing `output_filter` chain
+    let marker = format!("{}:{}", OWNERSHIP_MARKER, config.activation_id);
     let partial_ruleset = format!(
         r#"table inet {table} {{
     chain output_nat {{
@@ -241,7 +241,7 @@ fn test_firewall_verify_live_fails_if_chain_missing() {
 }}
 "#,
         table = config.table_name,
-        marker = OWNERSHIP_MARKER
+        marker = marker
     );
 
     let mut child = Command::new("nft")

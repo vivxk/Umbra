@@ -232,7 +232,13 @@ pub fn parse_proc_net_sockets(content: &str) -> Vec<SocketEntry> {
 pub fn find_socket_in_proc_net(proc_net_file: &Path, port: u16) -> Result<Option<SocketEntry>> {
     let content = match fs::read_to_string(proc_net_file) {
         Ok(c) => c,
-        Err(_) => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(UmbraError::TorInspectionError(format!(
+                "failed to read {}: {e}",
+                proc_net_file.display()
+            )));
+        }
     };
 
     let is_udp = proc_net_file
@@ -265,7 +271,13 @@ pub fn find_socket_inode_owner(
 ) -> Result<Option<(u32, String)>> {
     let entries = match fs::read_dir(proc_dir) {
         Ok(e) => e,
-        Err(_) => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(UmbraError::TorInspectionError(format!(
+                "failed to read proc directory {}: {e}",
+                proc_dir.display()
+            )));
+        }
     };
 
     let target_socket_str = format!("socket:[{target_inode}]");
@@ -302,7 +314,10 @@ pub fn verify_socket_ownership(
     expected_pid: Option<u32>,
 ) -> Result<()> {
     if !proc_net_file.exists() {
-        return Ok(());
+        return Err(UmbraError::TorInspectionError(format!(
+            "socket inspection table {} does not exist",
+            proc_net_file.display()
+        )));
     }
 
     let socket = match find_socket_in_proc_net(proc_net_file, port)? {
@@ -671,6 +686,8 @@ impl TorController {
             }
         };
 
+        let mut valid_matches = Vec::new();
+
         for entry in proc_entries.flatten() {
             let file_name = entry.file_name();
             let pid_str = file_name.to_string_lossy();
@@ -685,7 +702,7 @@ impl TorController {
                             expected_owner_uid,
                             trusted_prefixes,
                         ) {
-                            Ok(ident) => return Ok(Some(ident)),
+                            Ok(ident) => valid_matches.push(ident),
                             Err(UmbraError::TorRunningAsRoot) => {
                                 return Err(UmbraError::TorRunningAsRoot)
                             }
@@ -697,7 +714,16 @@ impl TorController {
             }
         }
 
-        Ok(None)
+        if valid_matches.len() > 1 {
+            let pids: Vec<u32> = valid_matches.iter().map(|m| m.pid).collect();
+            return Err(UmbraError::TorProcessAmbiguous(format!(
+                "found {} instances: PIDs {:?}",
+                valid_matches.len(),
+                pids
+            )));
+        }
+
+        Ok(valid_matches.into_iter().next())
     }
 
     /// Strictly verifies a Tor process by PID in `/proc`

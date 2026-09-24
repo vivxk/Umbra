@@ -472,26 +472,18 @@ impl DnsController {
             .parse()
             .map_err(|_| UmbraError::DnsProtectionFailed("invalid socket address".to_string()))?;
 
-        // Cryptographically secure random query ID with fallback to timestamp
+        // Generate random query ID strictly via /dev/urandom
         let mut id_bytes = [0u8; 2];
-        let query_id = if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            use std::io::Read;
-            if f.read_exact(&mut id_bytes).is_ok() {
-                u16::from_ne_bytes(id_bytes)
-            } else {
-                (std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0xABCD)
-                    & 0xFFFF) as u16
-            }
-        } else {
-            (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0xABCD)
-                & 0xFFFF) as u16
-        };
+        let mut f = std::fs::File::open("/dev/urandom").map_err(|e| {
+            UmbraError::DnsProtectionFailed(format!("failed to open /dev/urandom: {e}"))
+        })?;
+        use std::io::Read;
+        f.read_exact(&mut id_bytes).map_err(|e| {
+            UmbraError::DnsProtectionFailed(format!(
+                "failed to read query ID from /dev/urandom: {e}"
+            ))
+        })?;
+        let query_id = u16::from_ne_bytes(id_bytes);
 
         let query_packet = Self::build_query(domain, query_id)?;
 

@@ -66,6 +66,15 @@ pub enum UmbraError {
     #[error("Tor identity verification failed: {0}")]
     TorIdentityUnknown(String),
 
+    #[error("Multiple valid Tor processes found; selection is ambiguous: {0}")]
+    TorProcessAmbiguous(String),
+
+    #[error("Tor /proc inspection error: {0}")]
+    TorInspectionError(String),
+
+    #[error("Trusted binary resolution failed: {0}")]
+    TrustedBinaryNotFound(String),
+
     #[error("Tor listener port {port} is closed or connection refused: {details}")]
     TorListenerPortClosed { port: u16, details: String },
 

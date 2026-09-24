@@ -92,10 +92,7 @@ impl StartupTransaction {
         let baseline = InterfaceController::capture_baseline(&iface)?;
 
         // 5. Generate and Apply Randomized MAC (Sections 24 & 25)
-        let random_mac = MacAddress::generate_random()?;
-        let mut mac_randomized = false;
-        let mut firewall_installed = false;
-
+        // 5. Generate Activation ID and Firefall Configuration
         let activation_id = format!(
             "{:x}",
             SystemTime::now()
@@ -115,15 +112,35 @@ impl StartupTransaction {
             ..Default::default()
         };
 
+        // 6. Generate Randomized MAC
+        let random_mac = MacAddress::generate_random()?;
+        let mut mac_randomized = false;
+        let mut firewall_installed = false;
+
+        // 7. Persist STARTING / recoverable runtime state BEFORE any host mutation (Section 4)
+        let mut active_state = ActiveState::new_with_status(
+            activation_id.clone(),
+            iface.clone(),
+            baseline.original_mac.to_string(),
+            random_mac.to_string(),
+            baseline.was_up,
+            tor_uid,
+            options.transport_port,
+            options.dns_port,
+            fw_config.table_name.clone(),
+            UmbraStatus::Starting,
+        );
+        active_state.save_to_path(state_path)?;
+
         // Execution with transactional rollback protection
         let result: Result<StartupTransactionResult> = (|| {
+            // Atomically install restrictive firewall policy first (Section 31: restrictive before application traffic)
+            FirewallController::install(&fw_config)?;
+            firewall_installed = true;
+
             // Apply randomized MAC
             InterfaceController::apply_mac(&iface, random_mac)?;
             mac_randomized = true;
-
-            // Atomically install restrictive firewall policy (Section 31: restrictive before application traffic)
-            FirewallController::install(&fw_config)?;
-            firewall_installed = true;
 
             // Post-activation live verification gate (Sections 32, 45, 77)
             let report = LiveVerifier::verify_current_state()?;
@@ -134,18 +151,8 @@ impl StartupTransaction {
                 )));
             }
 
-            // Persist volatile active state (Section 9)
-            let active_state = ActiveState::new(
-                activation_id.clone(),
-                iface.clone(),
-                baseline.original_mac.to_string(),
-                random_mac.to_string(),
-                baseline.was_up,
-                tor_uid,
-                options.transport_port,
-                options.dns_port,
-                fw_config.table_name.clone(),
-            );
+            // Mark state as ACTIVE only after full live verification passes
+            active_state.status = UmbraStatus::Active;
             active_state.save_to_path(state_path)?;
 
             Ok(StartupTransactionResult {
@@ -169,6 +176,7 @@ impl StartupTransaction {
                     mac_randomized,
                     firewall_installed,
                     state_path,
+                    &mut active_state,
                 )?;
                 Err(e)
             }
@@ -182,14 +190,17 @@ impl StartupTransaction {
         mac_randomized: bool,
         firewall_installed: bool,
         state_path: &Path,
+        active_state: &mut ActiveState,
     ) -> Result<()> {
         let mut rollback_errors = Vec::new();
 
         // 1. Teardown firewall if installed
         if firewall_installed {
-            if let Err(e) =
-                FirewallController::teardown(&fw_config.table_family, &fw_config.table_name)
-            {
+            if let Err(e) = FirewallController::teardown_with_id(
+                &fw_config.table_family,
+                &fw_config.table_name,
+                Some(&fw_config.activation_id),
+            ) {
                 rollback_errors.push(format!("failed to teardown firewall: {e}"));
             }
         }
@@ -201,16 +212,19 @@ impl StartupTransaction {
             }
         }
 
-        // 3. Remove partial state file if created
-        let _ = ActiveState::remove_from_path(state_path);
-
         if !rollback_errors.is_empty() {
-            // If rollback itself failed or left ambiguous state, fail-closed per Section 40 & 81
+            // Section 5: If rollback cannot restore baseline, preserve recovery state!
+            active_state.status = UmbraStatus::RecoveryRequired;
+            let _ = active_state.save_to_path(state_path);
+
             return Err(UmbraError::RecoveryUncertain(format!(
-                "startup failed and rollback encountered errors (network remains fail-closed): {}",
+                "startup failed and rollback encountered errors (recovery state preserved, network remains fail-closed): {}",
                 rollback_errors.join("; ")
             )));
         }
+
+        // 3. Remove state file ONLY if rollback succeeded cleanly
+        let _ = ActiveState::remove_from_path(state_path);
 
         Ok(())
     }

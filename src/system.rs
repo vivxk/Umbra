@@ -96,3 +96,71 @@ pub fn require_root(operation: &str) -> Result<()> {
     }
     Ok(())
 }
+
+/// Standard trusted system binary paths in order of preference
+pub const TRUSTED_BIN_DIRS: &[&str] = &["/usr/sbin", "/sbin", "/usr/bin", "/bin"];
+
+/// Resolves a command to an absolute path within trusted root-owned system directories,
+/// verifying that the executable is owned by root, is not group/world-writable, and is executable.
+pub fn resolve_trusted_command(binary: &str) -> Result<std::process::Command> {
+    for &dir in TRUSTED_BIN_DIRS {
+        let candidate = Path::new(dir).join(binary);
+        if candidate.exists() {
+            let canonical = fs::canonicalize(&candidate).map_err(|e| {
+                UmbraError::TrustedBinaryNotFound(format!(
+                    "failed to resolve canonical path for {}: {e}",
+                    candidate.display()
+                ))
+            })?;
+
+            // Must reside within a trusted prefix
+            let in_trusted = TRUSTED_BIN_DIRS
+                .iter()
+                .any(|prefix| canonical.starts_with(Path::new(prefix)));
+            if !in_trusted {
+                continue;
+            }
+
+            let meta = fs::metadata(&canonical).map_err(|e| {
+                UmbraError::TrustedBinaryNotFound(format!(
+                    "cannot read metadata for {}: {e}",
+                    canonical.display()
+                ))
+            })?;
+
+            use std::os::unix::fs::MetadataExt;
+            if !meta.is_file() {
+                continue;
+            }
+            if meta.uid() != 0 {
+                return Err(UmbraError::TrustedBinaryNotFound(format!(
+                    "trusted binary {} is owned by UID {}, expected UID 0 (root)",
+                    canonical.display(),
+                    meta.uid()
+                )));
+            }
+            let mode = meta.mode();
+            if (mode & 0o022) != 0 {
+                return Err(UmbraError::TrustedBinaryNotFound(format!(
+                    "trusted binary {} has insecure permissions (mode {:04o}): group- or world-writable",
+                    canonical.display(),
+                    mode & 0o7777
+                )));
+            }
+            if (mode & 0o111) == 0 {
+                return Err(UmbraError::TrustedBinaryNotFound(format!(
+                    "binary {} is not executable (mode {:04o})",
+                    canonical.display(),
+                    mode & 0o7777
+                )));
+            }
+
+            return Ok(std::process::Command::new(canonical));
+        }
+    }
+
+    Err(UmbraError::TrustedBinaryNotFound(format!(
+        "command '{binary}' was not found in trusted system directories ({:?})",
+        TRUSTED_BIN_DIRS
+    )))
+}

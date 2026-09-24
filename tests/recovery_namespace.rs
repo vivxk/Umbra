@@ -79,7 +79,7 @@ fn test_stop_workflow_clean_in_netns() {
     drop(tmp);
 
     let state = ActiveState::new(
-        "act_stop_test".to_string(),
+        fw_config.activation_id.clone(),
         dev_name.to_string(),
         orig_mac_str.to_string(),
         rand_mac_str.to_string(),
@@ -202,7 +202,7 @@ fn test_recover_normal_workflow_in_netns() {
     drop(tmp);
 
     let state = ActiveState::new(
-        "act_rec_norm".to_string(),
+        fw_config.activation_id.clone(),
         dev_name.to_string(),
         orig_mac_str.to_string(),
         rand_mac_str.to_string(),
@@ -567,7 +567,7 @@ fn test_recover_normal_fails_and_preserves_state_on_mac_restore_error_in_netns()
 
     // State points to a non-existent interface "dum_ghost99"
     let state = ActiveState::new(
-        "act_ghost_test".to_string(),
+        fw_config.activation_id.clone(),
         "dum_ghost99".to_string(),
         "02:aa:bb:cc:dd:40".to_string(),
         "02:44:55:66:77:88".to_string(),

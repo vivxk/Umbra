@@ -115,6 +115,7 @@ fn test_active_state_corrupt_validation() {
     let invalid_version = ActiveState {
         version: 99,
         activation_id: "test1".to_string(),
+        status: umbra::runtime_state::UmbraStatus::Active,
         interface: "eth0".to_string(),
         original_mac: "02:00:00:00:00:01".to_string(),
         randomized_mac: "02:00:00:00:00:02".to_string(),
@@ -130,6 +131,7 @@ fn test_active_state_corrupt_validation() {
     let empty_iface = ActiveState {
         version: 1,
         activation_id: "test1".to_string(),
+        status: umbra::runtime_state::UmbraStatus::Active,
         interface: "   ".to_string(),
         original_mac: "02:00:00:00:00:01".to_string(),
         randomized_mac: "02:00:00:00:00:02".to_string(),
@@ -162,6 +164,7 @@ fn test_active_state_mac_validation_strict() {
     let invalid_orig_mac = ActiveState {
         version: 1,
         activation_id: "test1".to_string(),
+        status: umbra::runtime_state::UmbraStatus::Active,
         interface: "eth0".to_string(),
         original_mac: "invalid-mac-address".to_string(),
         randomized_mac: "02:00:00:00:00:02".to_string(),
@@ -177,6 +180,7 @@ fn test_active_state_mac_validation_strict() {
     let zero_mac = ActiveState {
         version: 1,
         activation_id: "test1".to_string(),
+        status: umbra::runtime_state::UmbraStatus::Active,
         interface: "eth0".to_string(),
         original_mac: "00:00:00:00:00:00".to_string(),
         randomized_mac: "02:00:00:00:00:02".to_string(),

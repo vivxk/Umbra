@@ -88,11 +88,17 @@ echo "[✓] Verified Umbra is INACTIVE. Proceeding with uninstallation."
 if [ -z "$DESTDIR" ] && command -v systemctl >/dev/null 2>&1; then
     if systemctl is-enabled umbra-boot.service >/dev/null 2>&1; then
         echo "[*] Disabling systemd service umbra-boot.service..."
-        systemctl disable umbra-boot.service 2>/dev/null || true
+        if ! systemctl disable umbra-boot.service; then
+            echo "[!] Error: Failed to disable umbra-boot.service. Aborting uninstall."
+            exit 1
+        fi
     fi
     if systemctl is-active umbra-boot.service >/dev/null 2>&1; then
         echo "[*] Stopping systemd service umbra-boot.service..."
-        systemctl stop umbra-boot.service 2>/dev/null || true
+        if ! systemctl stop umbra-boot.service; then
+            echo "[!] Error: Failed to stop active umbra-boot.service. Aborting uninstall."
+            exit 1
+        fi
     fi
 fi
 
@@ -104,12 +110,17 @@ if [ -f "$SYSTEMD_DIR/umbra-boot.service" ]; then
     echo "[✓] Removed $SYSTEMD_DIR/umbra-boot.service"
 fi
 
-# 2. Clean Tor configuration fragment after verifying ownership marker
+# 2. Clean Tor configuration fragment after verifying ownership and integrity
 if [ -f "$TOR_FRAGMENT" ]; then
     if grep -q "# umbra-managed" "$TOR_FRAGMENT"; then
-        rm -f "$TOR_FRAGMENT"
-        echo "[✓] Removed Umbra-managed Tor config fragment: $TOR_FRAGMENT"
-        rmdir "$TORRC_DIR" 2>/dev/null || true
+        if ! grep -q "TransPort 127.0.0.1:9040" "$TOR_FRAGMENT" || ! grep -q "DNSPort 127.0.0.1:5353" "$TOR_FRAGMENT"; then
+            echo "[!] Warning: $TOR_FRAGMENT contains '# umbra-managed' but has been modified by user."
+            echo "    Preserving modified configuration file."
+        else
+            rm -f "$TOR_FRAGMENT"
+            echo "[✓] Removed Umbra-managed Tor config fragment: $TOR_FRAGMENT"
+            rmdir "$TORRC_DIR" 2>/dev/null || true
+        fi
     else
         echo "[!] Warning: $TOR_FRAGMENT exists but does NOT contain '# umbra-managed' marker."
         echo "    Leaving file untouched to prevent deleting user configuration."
@@ -127,14 +138,23 @@ if [ -L "$LOCAL_BIN_DIR/umbra" ] || [ -f "$LOCAL_BIN_DIR/umbra" ]; then
     echo "[✓] Removed $LOCAL_BIN_DIR/umbra"
 fi
 
-# 4. Clean runtime directory
-if [ -d "$RUN_DIR" ]; then
-    rm -rf "$RUN_DIR"
-    echo "[✓] Cleaned $RUN_DIR"
-fi
+# 4. Clean runtime directory safely file by file (Section 22)
+clean_run_dir() {
+    local dir="$1"
+    if [ -d "$dir" ] && [ ! -L "$dir" ]; then
+        for f in "$dir"/*; do
+            if [ -f "$f" ] || [ -L "$f" ]; then
+                rm -f "$f"
+            fi
+        done
+        rmdir "$dir" 2>/dev/null || true
+        echo "[✓] Cleaned $dir"
+    fi
+}
+
+clean_run_dir "$RUN_DIR"
 if [ -z "$DESTDIR" ] && [ -d "/run/umbra" ]; then
-    rm -rf "/run/umbra"
-    echo "[✓] Cleaned /run/umbra"
+    clean_run_dir "/run/umbra"
 fi
 
 echo ""

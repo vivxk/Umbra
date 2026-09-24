@@ -64,10 +64,24 @@ fi
 
 # 2. Install binary to $BIN_DIR/umbra and symlink $LOCAL_BIN_DIR/umbra
 echo "[*] Installing binary to $BIN_DIR/umbra..."
+if [ -f "$BIN_DIR/umbra" ]; then
+    if ! "$BIN_DIR/umbra" version >/dev/null 2>&1 && ! strings "$BIN_DIR/umbra" 2>/dev/null | grep -q "table inet umbra"; then
+        echo "[!] Error: Existing file at $BIN_DIR/umbra does not appear to be an Umbra binary."
+        echo "    Refusing to overwrite unverified binary to prevent destroying unrelated files."
+        exit 1
+    fi
+fi
 mkdir -p "$BIN_DIR"
 install -m 0755 "$RELEASE_BIN" "$BIN_DIR/umbra"
 
 if [ "$BIN_DIR" != "$LOCAL_BIN_DIR" ] && [ "$(realpath "$BIN_DIR" 2>/dev/null || echo "$BIN_DIR")" != "$(realpath "$LOCAL_BIN_DIR" 2>/dev/null || echo "$LOCAL_BIN_DIR")" ]; then
+    if [ -e "$LOCAL_BIN_DIR/umbra" ] || [ -L "$LOCAL_BIN_DIR/umbra" ]; then
+        if [ ! -L "$LOCAL_BIN_DIR/umbra" ]; then
+            echo "[!] Error: $LOCAL_BIN_DIR/umbra exists and is not a symbolic link."
+            echo "    Refusing to overwrite regular file to prevent destroying unrelated files."
+            exit 1
+        fi
+    fi
     mkdir -p "$LOCAL_BIN_DIR"
     ln -sf "$PREFIX/bin/umbra" "$LOCAL_BIN_DIR/umbra"
     echo "[✓] Symlinked: $LOCAL_BIN_DIR/umbra -> $PREFIX/bin/umbra"
@@ -75,6 +89,25 @@ fi
 echo "[✓] Binary installed: $BIN_DIR/umbra"
 
 # 3. Install Tor configuration fragment with verified ownership and symlink refusal
+if [ -e "$TORRC_DIR" ]; then
+    if [ -L "$TORRC_DIR" ]; then
+        echo "[!] Error: $TORRC_DIR is a symbolic link. Refusing to install."
+        exit 1
+    fi
+    if [ ! -d "$TORRC_DIR" ]; then
+        echo "[!] Error: $TORRC_DIR is not a directory. Refusing to install."
+        exit 1
+    fi
+    PERMS="$(stat -c '%a' "$TORRC_DIR" 2>/dev/null || stat -f '%Lp' "$TORRC_DIR" 2>/dev/null || true)"
+    if [ -n "$PERMS" ]; then
+        if echo "$PERMS" | grep -q -E "[2367].$|.[2367]$"; then
+            echo "[!] Error: $TORRC_DIR has insecure permissions ($PERMS: group or world-writable)."
+            echo "    Refusing to install into insecure directory."
+            exit 1
+        fi
+    fi
+fi
+
 mkdir -p "$TORRC_DIR"
 chmod 0755 "$TORRC_DIR"
 
@@ -118,6 +151,13 @@ fi
 # 4. Install systemd boot service unit template if systemd is present
 SERVICE_SRC="$REPO_ROOT/systemd/umbra-boot.service"
 if [ -f "$SERVICE_SRC" ]; then
+    if [ -f "$SYSTEMD_DIR/umbra-boot.service" ]; then
+        if ! grep -q "umbra" "$SYSTEMD_DIR/umbra-boot.service"; then
+            echo "[!] Error: Existing file at $SYSTEMD_DIR/umbra-boot.service is not an Umbra unit."
+            echo "    Refusing to overwrite unmanaged service file."
+            exit 1
+        fi
+    fi
     mkdir -p "$SYSTEMD_DIR"
     install -m 0644 "$SERVICE_SRC" "$SYSTEMD_DIR/umbra-boot.service"
     echo "[✓] Systemd unit installed: $SYSTEMD_DIR/umbra-boot.service"

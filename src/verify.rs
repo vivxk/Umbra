@@ -43,12 +43,42 @@ impl LiveVerifier {
         // 1. Check Firewall
         let table_exists = FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME)?;
         if table_exists {
-            match FirewallController::authenticate_ownership(NFT_TABLE_FAMILY, NFT_TABLE_NAME) {
+            let act_id = active_state.as_ref().map(|s| s.activation_id.as_str());
+            match FirewallController::authenticate_ownership_with_id(
+                NFT_TABLE_FAMILY,
+                NFT_TABLE_NAME,
+                act_id,
+            ) {
                 Ok(_) => {
-                    firewall_ok = true;
-                    details.push(
-                        "nftables: verified table inet umbra with ownership marker".to_string(),
-                    );
+                    if let Some(ref state) = active_state {
+                        let fw_config = crate::firewall::FirewallConfig {
+                            table_name: NFT_TABLE_NAME.to_string(),
+                            table_family: NFT_TABLE_FAMILY.to_string(),
+                            tor_uid: state.tor_uid,
+                            tor_transport_port: state.tor_transport_port,
+                            tor_dns_port: state.tor_dns_port,
+                            egress_interface: state.interface.clone(),
+                            activation_id: state.activation_id.clone(),
+                            ..Default::default()
+                        };
+                        match FirewallController::verify_live(&fw_config) {
+                            Ok(_) => {
+                                firewall_ok = true;
+                                details.push(
+                                    "nftables: verified table inet umbra with ownership marker and all enforcement policies"
+                                        .to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                details.push(format!("nftables: policy verification failed: {e}"));
+                            }
+                        }
+                    } else {
+                        firewall_ok = true;
+                        details.push(
+                            "nftables: verified table inet umbra with ownership marker".to_string(),
+                        );
+                    }
                 }
                 Err(e) => {
                     details.push(format!(
@@ -170,19 +200,24 @@ impl LiveVerifier {
             }
         }
 
-        // Determine aggregated status
-        let status = match (
-            active_state.is_some(),
-            firewall_ok,
-            tor_process_ok,
-            transport_ok,
-            dnsport_ok,
-        ) {
-            (true, true, true, true, true) => UmbraStatus::Active,
-            (false, false, _, _, _) => UmbraStatus::Inactive,
-            (true, false, _, _, _) => UmbraStatus::RecoveryRequired,
-            (false, true, _, _, _) => UmbraStatus::RecoveryRequired,
-            _ => UmbraStatus::Unknown,
+        // Determine aggregated status (Section 9: ACTIVE requires MAC integrity and full component health)
+        let status = if let Some(ref _state) = active_state {
+            if firewall_ok && tor_process_ok && transport_ok && dnsport_ok {
+                if mac_matches_state {
+                    UmbraStatus::Active
+                } else if live_mac_str.is_none() {
+                    UmbraStatus::Unknown
+                } else {
+                    UmbraStatus::RecoveryRequired
+                }
+            } else {
+                UmbraStatus::RecoveryRequired
+            }
+        } else if !firewall_ok {
+            UmbraStatus::Inactive
+        } else {
+            // No runtime state, but firewall table exists!
+            UmbraStatus::RecoveryRequired
         };
 
         Ok(VerificationReport {

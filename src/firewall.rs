@@ -1,7 +1,7 @@
 //! nftables firewall controller, ownership authentication, and atomic policy management.
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::constants::{
     DEFAULT_TOR_CONTROLPORT, DEFAULT_TOR_DNSPORT, DEFAULT_TOR_TRANSPORT, NFT_TABLE_FAMILY,
@@ -49,7 +49,15 @@ impl FirewallController {
     /// 5. Non-Tor application TCP is redirected to Tor TransPort.
     /// 6. Arbitrary UDP and QUIC are blocked fail-closed.
     /// 7. Loopback IPC communications are preserved.
+    /// 8. Pre-existing direct flows cannot bypass policy (no blanket ct state established accept).
+    /// 9. Unique activation identifier binds ruleset to active runtime session.
     pub fn generate_ruleset(config: &FirewallConfig) -> String {
+        let marker = if config.activation_id.trim().is_empty() {
+            OWNERSHIP_MARKER.to_string()
+        } else {
+            format!("{}:{}", OWNERSHIP_MARKER, config.activation_id.trim())
+        };
+
         format!(
             r#"table {family} {table} {{
     chain output_nat {{
@@ -66,7 +74,6 @@ impl FirewallController {
 
     chain output_filter {{
         type filter hook output priority filter; policy drop;
-        ct state established,related accept comment "{marker}"
         skuid {tor_uid} accept comment "{marker}"
         meta nfproto ipv6 udp dport 53 drop comment "{marker}"
         meta nfproto ipv6 tcp dport 53 drop comment "{marker}"
@@ -89,7 +96,7 @@ impl FirewallController {
             tor_dns_port = config.tor_dns_port,
             tor_transport_port = config.tor_transport_port,
             tor_control_port = config.tor_control_port,
-            marker = OWNERSHIP_MARKER
+            marker = marker
         )
     }
 
@@ -100,11 +107,13 @@ impl FirewallController {
         let run_check =
             |use_unshare: bool| -> std::result::Result<std::process::Output, std::io::Error> {
                 let mut cmd = if use_unshare {
-                    let mut c = Command::new("unshare");
+                    let mut c = crate::system::resolve_trusted_command("unshare")
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
                     c.args(["-r", "-n", "nft", "-c", "-f", "-"]);
                     c
                 } else {
-                    let mut c = Command::new("nft");
+                    let mut c = crate::system::resolve_trusted_command("nft")
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
                     c.args(["-c", "-f", "-"]);
                     c
                 };
@@ -166,7 +175,7 @@ impl FirewallController {
         // Pre-validate syntax before kernel application
         Self::check_syntax(&normalized)?;
 
-        let mut child = Command::new("nft")
+        let mut child = crate::system::resolve_trusted_command("nft")?
             .args(["-f", "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -197,7 +206,7 @@ impl FirewallController {
 
     /// Checks if the table currently exists in the kernel
     pub fn table_exists(family: &str, table: &str) -> Result<bool> {
-        let output = Command::new("nft")
+        let output = crate::system::resolve_trusted_command("nft")?
             .args(["list", "table", family, table])
             .output()
             .map_err(|e| {
@@ -238,9 +247,13 @@ impl FirewallController {
         Ok(())
     }
 
-    /// Authenticates that the live table is strictly owned by Umbra
-    pub fn authenticate_ownership(family: &str, table: &str) -> Result<()> {
-        let output = Command::new("nft")
+    /// Authenticates that the live table is strictly owned by Umbra and matches activation_id if specified
+    pub fn authenticate_ownership_with_id(
+        family: &str,
+        table: &str,
+        expected_activation_id: Option<&str>,
+    ) -> Result<()> {
+        let output = crate::system::resolve_trusted_command("nft")?
             .args(["list", "table", family, table])
             .output()
             .map_err(|e| {
@@ -258,10 +271,29 @@ impl FirewallController {
             UmbraError::FirewallOwnershipUnknown(format!(
                 "table {family} {table} missing required ownership marker '{OWNERSHIP_MARKER}'"
             ))
-        })
+        })?;
+
+        if let Some(act_id) = expected_activation_id {
+            if !act_id.trim().is_empty() {
+                let expected_marker = format!("{OWNERSHIP_MARKER}:{act_id}");
+                if !content.contains(&expected_marker) && !content.contains(act_id) {
+                    return Err(UmbraError::FirewallOwnershipUnknown(format!(
+                        "table {family} {table} activation ID mismatch: expected {act_id}"
+                    )));
+                }
+            }
+        }
+
+        Ok(())
     }
 
-    /// Verifies live enforcement: table exists, ownership authenticated, required chains and security rules active
+    /// Authenticates that the live table is strictly owned by Umbra
+    pub fn authenticate_ownership(family: &str, table: &str) -> Result<()> {
+        Self::authenticate_ownership_with_id(family, table, None)
+    }
+
+    /// Verifies live enforcement: table exists, ownership authenticated (including activation ID),
+    /// required base chains and hooks active, and security policies active.
     pub fn verify_live(config: &FirewallConfig) -> Result<()> {
         if !Self::table_exists(&config.table_family, &config.table_name)? {
             return Err(UmbraError::FirewallVerificationFailed(format!(
@@ -270,9 +302,90 @@ impl FirewallController {
             )));
         }
 
-        Self::authenticate_ownership(&config.table_family, &config.table_name)?;
+        let expected_act_id = if config.activation_id.trim().is_empty() {
+            None
+        } else {
+            Some(config.activation_id.trim())
+        };
+        Self::authenticate_ownership_with_id(
+            &config.table_family,
+            &config.table_name,
+            expected_act_id,
+        )?;
 
-        let output = Command::new("nft")
+        // Structured JSON inspection via nft -j list table
+        let json_output = crate::system::resolve_trusted_command("nft")?
+            .args([
+                "-j",
+                "list",
+                "table",
+                &config.table_family,
+                &config.table_name,
+            ])
+            .output();
+
+        let mut structured_verified = false;
+        if let Ok(ref out) = json_output {
+            if out.status.success() {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                    if let Some(items) = val.get("nftables").and_then(|v| v.as_array()) {
+                        let mut has_nat_chain = false;
+                        let mut has_filter_chain = false;
+
+                        for item in items {
+                            if let Some(chain) = item.get("chain") {
+                                let cname = chain
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or_default();
+                                let ctype = chain
+                                    .get("type")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or_default();
+                                let chook = chain
+                                    .get("hook")
+                                    .and_then(|h| h.as_str())
+                                    .unwrap_or_default();
+                                let cpolicy = chain
+                                    .get("policy")
+                                    .and_then(|p| p.as_str())
+                                    .unwrap_or_default();
+
+                                if cname == "output_nat" {
+                                    if ctype != "nat" || chook != "output" || cpolicy != "accept" {
+                                        return Err(UmbraError::FirewallVerificationFailed(format!(
+                                            "chain output_nat has invalid configuration: type={ctype}, hook={chook}, policy={cpolicy}"
+                                        )));
+                                    }
+                                    has_nat_chain = true;
+                                } else if cname == "output_filter" {
+                                    if ctype != "filter" || chook != "output" || cpolicy != "drop" {
+                                        return Err(UmbraError::FirewallVerificationFailed(format!(
+                                            "chain output_filter has invalid configuration: type={ctype}, hook={chook}, policy={cpolicy}"
+                                        )));
+                                    }
+                                    has_filter_chain = true;
+                                }
+                            }
+                        }
+
+                        if !has_nat_chain {
+                            return Err(UmbraError::FirewallVerificationFailed(
+                                "live ruleset missing base chain output_nat".to_string(),
+                            ));
+                        }
+                        if !has_filter_chain {
+                            return Err(UmbraError::FirewallVerificationFailed(
+                                "live ruleset missing base chain output_filter".to_string(),
+                            ));
+                        }
+                        structured_verified = true;
+                    }
+                }
+            }
+        }
+
+        let output = crate::system::resolve_trusted_command("nft")?
             .args(["list", "table", &config.table_family, &config.table_name])
             .output()
             .map_err(|e| {
@@ -281,16 +394,34 @@ impl FirewallController {
 
         let ruleset_str = String::from_utf8_lossy(&output.stdout);
 
-        if !ruleset_str.contains("chain output_nat") {
-            return Err(UmbraError::FirewallVerificationFailed(
-                "live ruleset missing chain output_nat".to_string(),
-            ));
+        if !structured_verified {
+            if !ruleset_str.contains("chain output_nat") {
+                return Err(UmbraError::FirewallVerificationFailed(
+                    "live ruleset missing chain output_nat".to_string(),
+                ));
+            }
+            if !ruleset_str.contains("chain output_filter") {
+                return Err(UmbraError::FirewallVerificationFailed(
+                    "live ruleset missing chain output_filter".to_string(),
+                ));
+            }
         }
-        if !ruleset_str.contains("chain output_filter") {
-            return Err(UmbraError::FirewallVerificationFailed(
-                "live ruleset missing chain output_filter".to_string(),
-            ));
+
+        // Verify Tor UID exceptions
+        let expected_tor_nat = format!("skuid {} return", config.tor_uid);
+        if !ruleset_str.contains(&expected_tor_nat) {
+            return Err(UmbraError::FirewallVerificationFailed(format!(
+                "live ruleset missing Tor UID NAT return rule: {expected_tor_nat}"
+            )));
         }
+        let expected_tor_filter = format!("skuid {} accept", config.tor_uid);
+        if !ruleset_str.contains(&expected_tor_filter) {
+            return Err(UmbraError::FirewallVerificationFailed(format!(
+                "live ruleset missing Tor UID filter accept rule: {expected_tor_filter}"
+            )));
+        }
+
+        // Verify Redirection rules
         let expected_dns_redirect = format!("redirect to :{}", config.tor_dns_port);
         if !ruleset_str.contains(&expected_dns_redirect) {
             return Err(UmbraError::FirewallVerificationFailed(format!(
@@ -303,6 +434,8 @@ impl FirewallController {
                 "live ruleset missing transport redirection rule: {expected_transport_redirect}"
             )));
         }
+
+        // Verify DNS and leak protection policies
         if !ruleset_str.contains("tcp dport 53 reject with tcp reset") {
             return Err(UmbraError::FirewallVerificationFailed(
                 "live ruleset missing tcp dport 53 reset rule".to_string(),
@@ -343,21 +476,30 @@ impl FirewallController {
                 "live ruleset missing ipv6 drop rule".to_string(),
             ));
         }
+        if !ruleset_str.contains("oif \"lo\" accept") {
+            return Err(UmbraError::FirewallVerificationFailed(
+                "live ruleset missing loopback accept rule".to_string(),
+            ));
+        }
 
         Ok(())
     }
 
-    /// Safely deletes the Umbra-owned table after strictly verifying ownership
-    pub fn teardown(family: &str, table: &str) -> Result<()> {
+    /// Safely deletes the Umbra-owned table after strictly verifying ownership and activation ID
+    pub fn teardown_with_id(
+        family: &str,
+        table: &str,
+        expected_activation_id: Option<&str>,
+    ) -> Result<()> {
         if !Self::table_exists(family, table)? {
             // Table already absent - nothing to remove
             return Ok(());
         }
 
-        // Enforce ownership verification before deletion
-        Self::authenticate_ownership(family, table)?;
+        // Enforce ownership and activation ID verification before deletion
+        Self::authenticate_ownership_with_id(family, table, expected_activation_id)?;
 
-        let output = Command::new("nft")
+        let output = crate::system::resolve_trusted_command("nft")?
             .args(["delete", "table", family, table])
             .output()
             .map_err(|e| {
@@ -379,5 +521,10 @@ impl FirewallController {
         }
 
         Ok(())
+    }
+
+    /// Safely deletes the Umbra-owned table after strictly verifying ownership
+    pub fn teardown(family: &str, table: &str) -> Result<()> {
+        Self::teardown_with_id(family, table, None)
     }
 }

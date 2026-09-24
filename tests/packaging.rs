@@ -202,10 +202,27 @@ fn test_uninstall_script_inactive_enforcement_and_safe_cleanup() {
         "Unmanaged config must NOT be deleted by uninstall.sh"
     );
 
-    // Now test managed file cleanup
+    // Test Section 21: Modified Umbra fragment (contains marker but altered content) is preserved
     fs::write(
         &tor_fragment,
-        "# umbra-managed: Umbra Tor Configuration Fragment\n",
+        "# umbra-managed: Umbra Tor Configuration Fragment\n# Custom user modification\nMyCustomTorOption 1\n",
+    )
+    .unwrap();
+    let uninstall_modified_status = Command::new("bash")
+        .arg(&uninstall_sh)
+        .env("DESTDIR", destdir)
+        .status()
+        .expect("run uninstall.sh with modified fragment");
+    assert!(uninstall_modified_status.success());
+    assert!(
+        tor_fragment.exists(),
+        "User-modified fragment must be preserved per Section 21"
+    );
+
+    // Now test standard managed file cleanup
+    fs::write(
+        &tor_fragment,
+        "# umbra-managed: Umbra Tor Configuration Fragment\nTransPort 127.0.0.1:9040\nDNSPort 127.0.0.1:5353\nControlPort 127.0.0.1:9051\nCookieAuthentication 1\n",
     )
     .unwrap();
     let final_uninstall_status = Command::new("bash")

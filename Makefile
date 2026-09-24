@@ -20,7 +20,7 @@ clippy:
 fmt:
 	$(CARGO) fmt --check
 
-install: build
+install:
 	@if [ "$$(id -u)" -eq 0 ]; then \
 		DESTDIR="$(DESTDIR)" PREFIX="$(PREFIX)" bash scripts/install.sh; \
 	else \

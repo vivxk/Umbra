@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use crate::error::{Result, UmbraError};
 use crate::mac::MacAddress;
@@ -149,7 +148,7 @@ impl InterfaceController {
         }
 
         // Fallback: run `ip route show default`
-        let output = Command::new("ip")
+        let output = crate::system::resolve_trusted_command("ip")?
             .args(["route", "show", "default"])
             .output()
             .map_err(|e| {
@@ -194,6 +193,20 @@ impl InterfaceController {
         let sys_path = sysfs_root.join(iface);
         if !sys_path.exists() {
             return Err(UmbraError::InterfaceNotFound(iface.to_string()));
+        }
+
+        // Check interface type if available in sysfs: 1 is ARPHRD_ETHER
+        let type_path = sys_path.join("type");
+        if type_path.exists() {
+            if let Ok(content) = fs::read_to_string(&type_path) {
+                if let Ok(dev_type) = content.trim().parse::<u32>() {
+                    if dev_type != 1 {
+                        return Err(UmbraError::InvalidMacAddress(format!(
+                            "interface '{iface}' has link type {dev_type} (expected ARPHRD_ETHER 1); tunnel/point-to-point interfaces do not support MAC randomization"
+                        )));
+                    }
+                }
+            }
         }
 
         let original_mac = Self::read_mac_from_sysfs(sysfs_root, iface)?;
@@ -270,7 +283,7 @@ impl InterfaceController {
     /// Sets interface administrative state UP or DOWN using ip link
     pub fn set_admin_state(iface: &str, up: bool) -> Result<()> {
         let state_arg = if up { "up" } else { "down" };
-        let output = Command::new("ip")
+        let output = crate::system::resolve_trusted_command("ip")?
             .args(["link", "set", "dev", iface, state_arg])
             .output()
             .map_err(|e| UmbraError::InterfaceStateChangeFailed {
@@ -316,7 +329,7 @@ impl InterfaceController {
         }
 
         let mac_str = new_mac.to_string();
-        let output = Command::new("ip")
+        let output = crate::system::resolve_trusted_command("ip")?
             .args(["link", "set", "dev", iface, "address", &mac_str])
             .output()
             .map_err(|e| UmbraError::MacChangeFailed {
@@ -386,7 +399,7 @@ impl InterfaceController {
         }
 
         let orig_mac_str = baseline.original_mac.to_string();
-        let output = Command::new("ip")
+        let output = crate::system::resolve_trusted_command("ip")?
             .args([
                 "link",
                 "set",
