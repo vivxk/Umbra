@@ -51,14 +51,47 @@ pub enum UmbraError {
     #[error("Tor service is not running")]
     TorNotRunning,
 
+    #[error("Tor process with PID {0} not found")]
+    TorProcessNotFound(u32),
+
+    #[error("Process {pid} is not Tor (comm is '{comm}')")]
+    TorProcessMismatch { pid: u32, comm: String },
+
+    #[error("Tor executable untrusted: {0}")]
+    TorExecutableUntrusted(String),
+
     #[error("Tor process runs with root privileges (UID 0), which is forbidden")]
     TorRunningAsRoot,
 
     #[error("Tor identity verification failed: {0}")]
     TorIdentityUnknown(String),
 
+    #[error("Tor listener port {port} is closed or connection refused: {details}")]
+    TorListenerPortClosed { port: u16, details: String },
+
+    #[error("Tor listener port {port} connection timed out: {details}")]
+    TorListenerTimeout { port: u16, details: String },
+
+    #[error(
+        "Tor listener port {port} belongs to wrong process (expected {expected}, found {actual})"
+    )]
+    TorListenerWrongProcess {
+        port: u16,
+        expected: String,
+        actual: String,
+    },
+
     #[error("Tor listener missing on port {port}: {details}")]
     TorListenerMissing { port: u16, details: String },
+
+    #[error("Tor configuration fragment ownership check failed: {0}")]
+    TorConfigOwnershipMismatch(String),
+
+    #[error("Tor ControlPort authentication failed: {0}")]
+    TorControlAuthFailed(String),
+
+    #[error("Tor ControlPort protocol error: {0}")]
+    TorControlProtocolError(String),
 
     #[error("Tor ControlPort error: {0}")]
     TorControlError(String),

@@ -60,12 +60,25 @@ fn handle_start(interface_override: Option<String>) -> Result<()> {
     );
 
     // 3. Resolve Tor Identity
-    let tor_uid = TorController::resolve_tor_uid()?;
-    println!("[+] Tor identity resolved: UID {tor_uid}");
+    let tor_ident = TorController::find_tor_process()?;
+    let tor_uid = match tor_ident {
+        Some(ref ident) => {
+            println!(
+                "[+] Tor process verified: PID {} (UID {}, exe: {})",
+                ident.pid, ident.uid, ident.exe_path
+            );
+            ident.uid
+        }
+        None => {
+            let uid = TorController::resolve_tor_uid()?;
+            println!("[+] Tor identity resolved: UID {uid}");
+            uid
+        }
+    };
 
     // 4. Verify Tor prerequisites
-    TorController::verify_transport(DEFAULT_TOR_TRANSPORT)?;
-    TorController::verify_dnsport(DEFAULT_TOR_DNSPORT)?;
+    TorController::verify_transport_with_identity(DEFAULT_TOR_TRANSPORT, tor_ident.as_ref())?;
+    TorController::verify_dnsport_with_identity(DEFAULT_TOR_DNSPORT, tor_ident.as_ref())?;
     println!("[+] Tor listeners verified (TransPort:{DEFAULT_TOR_TRANSPORT}, DNSPort:{DEFAULT_TOR_DNSPORT})");
 
     // 5. Generate and Apply Randomized MAC
@@ -189,6 +202,14 @@ fn handle_status() -> Result<()> {
             "not listening"
         }
     );
+    println!(
+        "ControlPort:  {}",
+        if report.controlport_ok {
+            "verified"
+        } else {
+            "not listening / unverified"
+        }
+    );
 
     println!("\nDiagnostics:");
     for detail in &report.details {
@@ -215,6 +236,7 @@ fn handle_recover() -> Result<()> {
 
 fn handle_newnym() -> Result<()> {
     require_root("newnym")?;
+    let _lock = ProcessLock::acquire()?;
     println!("[*] Requesting new Tor identity (SIGNAL NEWNYM)...");
     TorController::request_newnym(DEFAULT_TOR_CONTROLPORT)?;
     println!("[✓] Successfully signaled Tor for new identity circuit.");

@@ -1,7 +1,8 @@
 //! Live system state verification and health reporting.
 
 use crate::constants::{
-    DEFAULT_TOR_DNSPORT, DEFAULT_TOR_TRANSPORT, NFT_TABLE_FAMILY, NFT_TABLE_NAME,
+    DEFAULT_TOR_CONTROLPORT, DEFAULT_TOR_DNSPORT, DEFAULT_TOR_TRANSPORT, NFT_TABLE_FAMILY,
+    NFT_TABLE_NAME,
 };
 use crate::error::Result;
 use crate::firewall::FirewallController;
@@ -16,6 +17,7 @@ pub struct VerificationReport {
     pub tor_process_ok: bool,
     pub transport_ok: bool,
     pub dnsport_ok: bool,
+    pub controlport_ok: bool,
     pub interface: Option<String>,
     pub live_mac: Option<String>,
     pub mac_matches_state: bool,
@@ -59,6 +61,7 @@ impl LiveVerifier {
         }
 
         // 2. Check Tor process
+        let mut verified_tor_ident = None;
         match TorController::find_tor_process() {
             Ok(Some(ident)) => {
                 tor_process_ok = true;
@@ -66,6 +69,7 @@ impl LiveVerifier {
                     "tor: verified running process PID {} (UID {}, exe: {})",
                     ident.pid, ident.uid, ident.exe_path
                 ));
+                verified_tor_ident = Some(ident);
             }
             Ok(None) => {
                 details.push("tor: no running tor process detected in /proc".to_string());
@@ -80,11 +84,14 @@ impl LiveVerifier {
             .as_ref()
             .map(|s| s.tor_transport_port)
             .unwrap_or(DEFAULT_TOR_TRANSPORT);
-        match TorController::verify_transport(transport_port) {
+        match TorController::verify_transport_with_identity(
+            transport_port,
+            verified_tor_ident.as_ref(),
+        ) {
             Ok(_) => {
                 transport_ok = true;
                 details.push(format!(
-                    "tor: TransPort 127.0.0.1:{transport_port} is responding"
+                    "tor: TransPort 127.0.0.1:{transport_port} is responding and verified"
                 ));
             }
             Err(e) => {
@@ -99,17 +106,37 @@ impl LiveVerifier {
             .as_ref()
             .map(|s| s.tor_dns_port)
             .unwrap_or(DEFAULT_TOR_DNSPORT);
-        match TorController::verify_dnsport(dns_port) {
+        match TorController::verify_dnsport_with_identity(dns_port, verified_tor_ident.as_ref()) {
             Ok(_) => {
                 dnsport_ok = true;
-                details.push(format!("tor: DNSPort 127.0.0.1:{dns_port} is responding"));
+                details.push(format!(
+                    "tor: DNSPort 127.0.0.1:{dns_port} is responding and verified"
+                ));
             }
             Err(e) => {
                 details.push(format!("tor: DNSPort 127.0.0.1:{dns_port} failed: {e}"));
             }
         }
 
-        // 5. Check Interface & MAC
+        // 5. Check Tor ControlPort (local-only, Tor protocol)
+        let mut controlport_ok = false;
+        let control_port = DEFAULT_TOR_CONTROLPORT;
+        match TorController::verify_controlport_with_identity(
+            control_port,
+            verified_tor_ident.as_ref(),
+        ) {
+            Ok(_) => {
+                controlport_ok = true;
+                details.push(format!(
+                    "tor: ControlPort 127.0.0.1:{control_port} is responding and verified"
+                ));
+            }
+            Err(e) => {
+                details.push(format!("tor: ControlPort 127.0.0.1:{control_port}: {e}"));
+            }
+        }
+
+        // 6. Check Interface & MAC
         if let Some(ref state) = active_state {
             interface_name = Some(state.interface.clone());
             if let Ok(current_mac) = InterfaceController::read_mac(&state.interface) {
@@ -150,6 +177,7 @@ impl LiveVerifier {
             tor_process_ok,
             transport_ok,
             dnsport_ok,
+            controlport_ok,
             interface: interface_name,
             live_mac: live_mac_str,
             mac_matches_state,
