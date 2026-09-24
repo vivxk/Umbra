@@ -26,7 +26,7 @@ fn run_app(cli: Cli) -> Result<()> {
         Commands::Start { interface } => handle_start(interface),
         Commands::Stop => handle_stop(),
         Commands::Status => handle_status(),
-        Commands::Recover { normal: _ } => handle_recover(),
+        Commands::Recover { normal: _, force } => handle_recover(force),
         Commands::Newnym => handle_newnym(),
         Commands::Version => {
             println!("Umbra v0.1.0 - Minimal privacy-first, fail-closed Linux network boundary");
@@ -70,10 +70,13 @@ fn handle_start(interface_override: Option<String>) -> Result<()> {
 
 fn handle_stop() -> Result<()> {
     require_root("stop")?;
-    let _lock = ProcessLock::acquire()?;
+    let lock = ProcessLock::acquire()?;
 
     println!("[*] Stopping Umbra and restoring network state...");
     RecoveryController::stop()?;
+
+    drop(lock);
+    let _ = ProcessLock::cleanup();
 
     println!("[✓] Umbra is INACTIVE. Normal networking restored.");
     Ok(())
@@ -141,17 +144,25 @@ fn handle_status() -> Result<()> {
     Ok(())
 }
 
-fn handle_recover() -> Result<()> {
+fn handle_recover(force: bool) -> Result<()> {
     require_root("recover")?;
-    let _lock = ProcessLock::acquire()?;
+    let lock = ProcessLock::acquire()?;
 
-    println!("[*] Executing normal recovery workflow...");
-    let actions = RecoveryController::recover_normal()?;
+    let actions = if force {
+        println!("[*] Executing force recovery workflow...");
+        RecoveryController::recover_force()?
+    } else {
+        println!("[*] Executing normal recovery workflow...");
+        RecoveryController::recover_normal()?
+    };
 
     println!("[✓] Recovery completed:");
     for action in actions {
         println!(" - {action}");
     }
+
+    drop(lock);
+    let _ = ProcessLock::cleanup();
 
     Ok(())
 }

@@ -30,8 +30,12 @@ pub enum Commands {
     /// Recover host from interrupted or inconsistent state to normal networking
     Recover {
         /// Reset to normal unproxied networking
-        #[arg(long, default_value_t = true)]
+        #[arg(long, conflicts_with = "force")]
         normal: bool,
+
+        /// Force recovery when state file is missing or corrupt
+        #[arg(long, conflicts_with = "normal")]
+        force: bool,
     },
 
     /// Request a new Tor identity circuit via ControlPort

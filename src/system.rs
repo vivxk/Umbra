@@ -63,6 +63,19 @@ impl ProcessLock {
 
         Ok(Self { file })
     }
+
+    /// Removes the standard lock file at LOCK_FILE if present
+    pub fn cleanup() -> Result<()> {
+        Self::cleanup_path(Path::new(LOCK_FILE))
+    }
+
+    /// Removes the lock file at the specified path if present
+    pub fn cleanup_path(path: &Path) -> Result<()> {
+        if path.exists() {
+            let _ = fs::remove_file(path);
+        }
+        Ok(())
+    }
 }
 
 impl Drop for ProcessLock {
