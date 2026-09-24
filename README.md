@@ -242,16 +242,6 @@ The End-to-End Leak Prevention Suite verifies:
 
 ---
 
-## Security Guardrails
-
-As documented in `AGENTS.md`, Umbra development enforces strict operational boundaries:
-- **Never flush the host firewall**: `nft flush ruleset`, `iptables -F`, or `ip6tables -F` are never executed on the host.
-- **Never modify unrelated tables**: Existing host tables (Docker, UFW, firewalld, WireGuard) are isolated and preserved.
-- **Privilege Separation**: Tor must always run as an unprivileged user, never as `root`.
-- **Fail-Closed Guarantee**: Under no circumstances will Umbra open the network to direct clearnet when an error occurs.
-
----
-
 ## License
 
 Dual-licensed under either of:
