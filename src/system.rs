@@ -13,6 +13,7 @@ use crate::constants::LOCK_FILE;
 use crate::error::{Result, UmbraError};
 
 /// Scoped file lock guard that releases the lock upon dropping
+#[derive(Debug)]
 pub struct ProcessLock {
     file: File,
 }

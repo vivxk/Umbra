@@ -5,14 +5,11 @@ use std::process;
 
 use umbra::cli::{Cli, Commands};
 use umbra::constants::{DEFAULT_TOR_CONTROLPORT, DEFAULT_TOR_DNSPORT, DEFAULT_TOR_TRANSPORT};
-use umbra::error::{Result, UmbraError};
-use umbra::firewall::{FirewallConfig, FirewallController};
-use umbra::interface::InterfaceController;
-use umbra::mac::MacAddress;
+use umbra::error::Result;
 use umbra::recovery::RecoveryController;
-use umbra::runtime_state::{ActiveState, UmbraStatus};
 use umbra::system::{require_root, ProcessLock};
 use umbra::tor::TorController;
+use umbra::transaction::{StartupTransaction, StartupTransactionOptions};
 use umbra::verify::LiveVerifier;
 
 fn main() {
@@ -45,93 +42,27 @@ fn handle_start(interface_override: Option<String>) -> Result<()> {
 
     println!("[*] Initializing Umbra privacy boundary...");
 
-    // 1. Identify Egress Interface
-    let iface = match interface_override {
-        Some(name) => name,
-        None => InterfaceController::detect_default_egress()?,
-    };
-    println!("[+] Authoritative egress interface: {iface}");
-
-    // 2. Capture Baseline
-    let baseline = InterfaceController::capture_baseline(&iface)?;
-    println!(
-        "[+] Baseline captured: MAC {} (admin UP: {})",
-        baseline.original_mac, baseline.was_up
-    );
-
-    // 3. Resolve Tor Identity
-    let tor_ident = TorController::find_tor_process()?.ok_or(UmbraError::TorNotRunning)?;
-    println!(
-        "[+] Tor process verified: PID {} (UID {}, exe: {})",
-        tor_ident.pid, tor_ident.uid, tor_ident.exe_path
-    );
-    let tor_uid = tor_ident.uid;
-
-    // 4. Verify Tor prerequisites
-    TorController::verify_transport_with_identity(DEFAULT_TOR_TRANSPORT, Some(&tor_ident))?;
-    TorController::verify_dnsport_with_identity(DEFAULT_TOR_DNSPORT, Some(&tor_ident))?;
-    println!("[+] Tor listeners verified (TransPort:{DEFAULT_TOR_TRANSPORT}, DNSPort:{DEFAULT_TOR_DNSPORT})");
-
-    // 5. Generate and Apply Randomized MAC
-    let random_mac = MacAddress::generate_random()?;
-    println!("[*] Randomizing MAC for {iface} to {random_mac}...");
-    InterfaceController::apply_mac(&iface, random_mac)?;
-    println!("[+] MAC randomized and verified on {iface}");
-
-    // 6. Establish Firewall Policy
-    let activation_id = format!(
-        "{:x}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
-    let fw_config = FirewallConfig {
-        tor_uid,
-        egress_interface: iface.clone(),
-        activation_id: activation_id.clone(),
-        ..Default::default()
+    let options = StartupTransactionOptions {
+        interface_override,
+        transport_port: DEFAULT_TOR_TRANSPORT,
+        dns_port: DEFAULT_TOR_DNSPORT,
+        state_file_override: None,
     };
 
-    println!("[*] Installing atomic nftables policy (table inet umbra)...");
-    if let Err(e) = FirewallController::install(&fw_config) {
-        eprintln!("[!] Firewall installation failed: {e}. Reverting MAC to baseline...");
-        let _ = InterfaceController::restore_baseline(&baseline);
-        return Err(UmbraError::FirewallInstallFailed(format!(
-            "{e} (fail-closed posture preserved)"
-        )));
-    }
-    println!("[+] Firewall policy installed and verified in kernel");
-
-    // 7. Persist Volatile Active State
-    let active_state = ActiveState::new(
-        activation_id,
-        iface.clone(),
-        baseline.original_mac.to_string(),
-        random_mac.to_string(),
-        baseline.was_up,
-        tor_uid,
-        DEFAULT_TOR_TRANSPORT,
-        DEFAULT_TOR_DNSPORT,
-        fw_config.table_name,
-    );
-    active_state.save()?;
-
-    // 8. Final Live Verification
-    let report = LiveVerifier::verify_current_state()?;
-    if report.status != UmbraStatus::Active {
-        eprintln!("[!] Final verification failed. Entering fail-closed recovery state.");
-        return Err(UmbraError::FirewallVerificationFailed(
-            "live enforcement state failed post-activation check".to_string(),
-        ));
-    }
+    let result = StartupTransaction::execute(options)?;
 
     println!("\n[✓] Umbra is ACTIVE");
-    println!("    Interface:       {iface}");
-    println!("    Randomized MAC:  {random_mac}");
+    println!("    Interface:       {}", result.interface);
+    println!("    Randomized MAC:  {}", result.randomized_mac);
     println!("    Firewall:        Enforced (table inet umbra)");
-    println!("    Tor Routing:     Enforced (TransPort {DEFAULT_TOR_TRANSPORT})");
-    println!("    DNS Intercept:   Enforced (DNSPort {DEFAULT_TOR_DNSPORT})");
+    println!(
+        "    Tor Routing:     Enforced (TransPort {})",
+        result.transport_port
+    );
+    println!(
+        "    DNS Intercept:   Enforced (DNSPort {})",
+        result.dns_port
+    );
     println!("    Direct Egress:   BLOCKED (fail-closed)");
 
     Ok(())

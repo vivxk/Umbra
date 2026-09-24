@@ -108,6 +108,15 @@ pub enum UmbraError {
     #[error("Single-instance lock acquisition failed: {0}")]
     LockAcquisitionFailed(String),
 
+    #[error("Umbra is already active or an active session exists (interface: {interface}, activation: {activation_id})")]
+    AlreadyActive {
+        interface: String,
+        activation_id: String,
+    },
+
+    #[error("Startup transaction aborted: {0}")]
+    StartupAborted(String),
+
     #[error("Recovery uncertain: safety invariant cannot be guaranteed, aborting to fail-closed state ({0})")]
     RecoveryUncertain(String),
 

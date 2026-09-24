@@ -11,4 +11,5 @@ pub mod recovery;
 pub mod runtime_state;
 pub mod system;
 pub mod tor;
+pub mod transaction;
 pub mod verify;
