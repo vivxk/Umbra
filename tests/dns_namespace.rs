@@ -91,53 +91,72 @@ fn test_dns_netns_udp53_redirection_to_tor_dnsport() {
         .expect("set read timeout");
 
     let server_handle = thread::spawn(move || {
-        let mut buf = [0u8; 512];
-        let (bytes_read, peer) = dns_sock.recv_from(&mut buf).expect("recv dns query");
-        let query_id = u16::from_be_bytes([buf[0], buf[1]]);
+        for _ in 0..3 {
+            let mut buf = [0u8; 512];
+            let (bytes_read, peer) = dns_sock.recv_from(&mut buf).expect("recv dns query");
+            let query_id = u16::from_be_bytes([buf[0], buf[1]]);
 
-        // Build valid response for the query
-        let mut resp = Vec::new();
-        resp.extend_from_slice(&query_id.to_be_bytes());
-        resp.extend_from_slice(&[0x81, 0x80]); // QR=1, RCODE=0
-        resp.extend_from_slice(&[0x00, 0x01]); // QDCOUNT=1
-        resp.extend_from_slice(&[0x00, 0x01]); // ANCOUNT=1
-        resp.extend_from_slice(&[0x00, 0x00]);
-        resp.extend_from_slice(&[0x00, 0x00]);
-        resp.extend_from_slice(&buf[12..bytes_read]); // Question echo
-        resp.extend_from_slice(&[0xC0, 0x0C]); // Pointer to name
-        resp.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]); // Type A, Class IN
-        resp.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]); // TTL 60
-        resp.extend_from_slice(&[0x00, 0x04]); // RDLENGTH 4
-        resp.extend_from_slice(&[192, 0, 2, 42]); // Resolved IP: 192.0.2.42
+            // Build valid response for the query
+            let mut resp = Vec::new();
+            resp.extend_from_slice(&query_id.to_be_bytes());
+            resp.extend_from_slice(&[0x81, 0x80]); // QR=1, RCODE=0
+            resp.extend_from_slice(&[0x00, 0x01]); // QDCOUNT=1
+            resp.extend_from_slice(&[0x00, 0x01]); // ANCOUNT=1
+            resp.extend_from_slice(&[0x00, 0x00]);
+            resp.extend_from_slice(&[0x00, 0x00]);
+            resp.extend_from_slice(&buf[12..bytes_read]); // Question echo
+            resp.extend_from_slice(&[0xC0, 0x0C]); // Pointer to name
+            resp.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]); // Type A, Class IN
+            resp.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]); // TTL 60
+            resp.extend_from_slice(&[0x00, 0x04]); // RDLENGTH 4
+            resp.extend_from_slice(&[192, 0, 2, 42]); // Resolved IP: 192.0.2.42
 
-        dns_sock.send_to(&resp, peer).expect("send dns reply");
+            dns_sock.send_to(&resp, peer).expect("send dns reply");
+        }
     });
 
-    // Client sends query to external public DNS: 8.8.8.8:53
     let client_sock = UdpSocket::bind("0.0.0.0:0").expect("bind client udp");
     client_sock
         .set_read_timeout(Some(Duration::from_secs(1)))
         .expect("client read timeout");
 
-    let query_bytes = DnsController::build_query("check.torproject.org", 0x7777).unwrap();
-    client_sock
-        .send_to(&query_bytes, "8.8.8.8:53")
-        .expect("send query to 8.8.8.8:53");
-
     let mut resp_buf = [0u8; 512];
+
+    // 1. External public DNS (8.8.8.8:53) redirected to DNSPort
+    let q1 = DnsController::build_query("check.torproject.org", 0x7771).unwrap();
+    client_sock
+        .send_to(&q1, "8.8.8.8:53")
+        .expect("send to 8.8.8.8:53");
     let (n, _) = client_sock
         .recv_from(&mut resp_buf)
-        .expect("client recv response redirected from DNSPort");
+        .expect("client recv 8.8.8.8 redirected");
+    let r1 = DnsController::parse_response(&resp_buf[..n], Some(0x7771)).expect("parse r1");
+    assert_eq!(r1.header.id, 0x7771);
+    assert_eq!(r1.answers[0].ip_addr, Some(Ipv4Addr::new(192, 0, 2, 42)));
 
-    let parsed_resp =
-        DnsController::parse_response(&resp_buf[..n], Some(0x7777)).expect("parse response");
-    assert_eq!(parsed_resp.header.id, 0x7777);
-    assert_eq!(parsed_resp.header.rcode, 0);
-    assert_eq!(parsed_resp.answers.len(), 1);
-    assert_eq!(
-        parsed_resp.answers[0].ip_addr,
-        Some(Ipv4Addr::new(192, 0, 2, 42))
-    );
+    // 2. Loopback DNS (127.0.0.1:53) redirected to DNSPort
+    let q2 = DnsController::build_query("check.torproject.org", 0x7772).unwrap();
+    client_sock
+        .send_to(&q2, "127.0.0.1:53")
+        .expect("send to 127.0.0.1:53");
+    let (n, _) = client_sock
+        .recv_from(&mut resp_buf)
+        .expect("client recv 127.0.0.1 redirected");
+    let r2 = DnsController::parse_response(&resp_buf[..n], Some(0x7772)).expect("parse r2");
+    assert_eq!(r2.header.id, 0x7772);
+    assert_eq!(r2.answers[0].ip_addr, Some(Ipv4Addr::new(192, 0, 2, 42)));
+
+    // 3. Systemd-resolved stub address (127.0.0.53:53) redirected to DNSPort
+    let q3 = DnsController::build_query("check.torproject.org", 0x7773).unwrap();
+    client_sock
+        .send_to(&q3, "127.0.0.53:53")
+        .expect("send to 127.0.0.53:53");
+    let (n, _) = client_sock
+        .recv_from(&mut resp_buf)
+        .expect("client recv 127.0.0.53 redirected");
+    let r3 = DnsController::parse_response(&resp_buf[..n], Some(0x7773)).expect("parse r3");
+    assert_eq!(r3.header.id, 0x7773);
+    assert_eq!(r3.answers[0].ip_addr, Some(Ipv4Addr::new(192, 0, 2, 42)));
 
     server_handle.join().unwrap();
     teardown_netns_environment(&config, &iface);
@@ -172,22 +191,21 @@ fn test_dns_netns_tcp53_rejected_with_rst() {
     });
     rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
-    // Application attempts TCP connection to port 53 (e.g., DNS TCP fallback)
-    let tcp_res =
-        TcpStream::connect_timeout(&"8.8.8.8:53".parse().unwrap(), Duration::from_millis(500));
-
-    // Must fail immediately due to TCP reset
-    assert!(
-        tcp_res.is_err(),
-        "TCP DNS to port 53 must be rejected immediately with TCP reset"
-    );
-
-    let err = tcp_res.unwrap_err();
-    assert_eq!(
-        err.kind(),
-        std::io::ErrorKind::ConnectionRefused,
-        "TCP DNS must receive ConnectionRefused (TCP RST), not timeout"
-    );
+    // Application attempts TCP connection to port 53 on external and loopback addresses
+    for target in ["8.8.8.8:53", "127.0.0.1:53", "127.0.0.53:53"] {
+        let tcp_res =
+            TcpStream::connect_timeout(&target.parse().unwrap(), Duration::from_millis(500));
+        assert!(
+            tcp_res.is_err(),
+            "TCP DNS to {target} must be rejected immediately with TCP reset"
+        );
+        let err = tcp_res.unwrap_err();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::ConnectionRefused,
+            "TCP DNS to {target} must receive ConnectionRefused (TCP RST), not timeout"
+        );
+    }
 
     let transport_received = transport_handle.join().unwrap();
     assert!(

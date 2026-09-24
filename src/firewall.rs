@@ -56,9 +56,9 @@ impl FirewallController {
         type nat hook output priority dstnat; policy accept;
         skuid {tor_uid} return comment "{marker}"
         meta nfproto ipv6 return comment "{marker}"
+        udp dport 53 redirect to :{tor_dns_port} comment "{marker}"
         oif "lo" return comment "{marker}"
         ip daddr 127.0.0.0/8 return comment "{marker}"
-        udp dport 53 redirect to :{tor_dns_port} comment "{marker}"
         tcp dport 53 return comment "{marker}"
         tcp dport 853 return comment "{marker}"
         tcp dport != {tor_transport_port} redirect to :{tor_transport_port} comment "{marker}"
@@ -68,12 +68,12 @@ impl FirewallController {
         type filter hook output priority filter; policy drop;
         ct state established,related accept comment "{marker}"
         skuid {tor_uid} accept comment "{marker}"
+        meta nfproto ipv6 udp dport 53 drop comment "{marker}"
+        meta nfproto ipv6 tcp dport 53 drop comment "{marker}"
         tcp dport 53 reject with tcp reset comment "{marker}"
         udp dport 443 drop comment "{marker}"
         tcp dport 853 drop comment "{marker}"
         udp dport 853 drop comment "{marker}"
-        meta nfproto ipv6 udp dport 53 drop comment "{marker}"
-        meta nfproto ipv6 tcp dport 53 drop comment "{marker}"
         ip6 daddr != ::1 drop comment "{marker}"
         ip daddr 127.0.0.1 tcp dport {tor_transport_port} accept comment "{marker}"
         ip daddr 127.0.0.1 udp dport {tor_dns_port} accept comment "{marker}"
@@ -290,6 +290,18 @@ impl FirewallController {
             return Err(UmbraError::FirewallVerificationFailed(
                 "live ruleset missing chain output_filter".to_string(),
             ));
+        }
+        let expected_dns_redirect = format!("redirect to :{}", config.tor_dns_port);
+        if !ruleset_str.contains(&expected_dns_redirect) {
+            return Err(UmbraError::FirewallVerificationFailed(format!(
+                "live ruleset missing dns redirection rule: {expected_dns_redirect}"
+            )));
+        }
+        let expected_transport_redirect = format!("redirect to :{}", config.tor_transport_port);
+        if !ruleset_str.contains(&expected_transport_redirect) {
+            return Err(UmbraError::FirewallVerificationFailed(format!(
+                "live ruleset missing transport redirection rule: {expected_transport_redirect}"
+            )));
         }
         if !ruleset_str.contains("tcp dport 53 reject with tcp reset") {
             return Err(UmbraError::FirewallVerificationFailed(

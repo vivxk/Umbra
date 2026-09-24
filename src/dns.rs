@@ -232,7 +232,7 @@ impl DnsController {
         };
 
         let mut pos = 12;
-        let mut questions = Vec::with_capacity(qdcount as usize);
+        let mut questions = Vec::with_capacity((qdcount as usize).min(64));
 
         for _ in 0..qdcount {
             match Self::parse_name(buf, &mut pos) {
@@ -261,7 +261,7 @@ impl DnsController {
             }
         }
 
-        let mut answers = Vec::with_capacity(ancount as usize);
+        let mut answers = Vec::with_capacity((ancount as usize).min(64));
         for _ in 0..ancount {
             match Self::parse_record(buf, &mut pos) {
                 Ok(rec) => answers.push(rec),
@@ -274,7 +274,7 @@ impl DnsController {
             }
         }
 
-        let mut authorities = Vec::with_capacity(nscount as usize);
+        let mut authorities = Vec::with_capacity((nscount as usize).min(64));
         for _ in 0..nscount {
             match Self::parse_record(buf, &mut pos) {
                 Ok(rec) => authorities.push(rec),
@@ -287,7 +287,7 @@ impl DnsController {
             }
         }
 
-        let mut additionals = Vec::with_capacity(arcount as usize);
+        let mut additionals = Vec::with_capacity((arcount as usize).min(64));
         let mut edns = None;
 
         for _ in 0..arcount {
@@ -374,8 +374,14 @@ impl DnsController {
                     ));
                 }
                 current_pos = pointer_offset;
-            } else {
+            } else if (len & 0xC0) == 0 {
+                // Uncompressed label
                 let label_len = len as usize;
+                if label_len > 63 {
+                    return Err(UmbraError::DnsProtectionFailed(
+                        "DNS label length exceeds 63 octets".to_string(),
+                    ));
+                }
                 current_pos += 1;
                 if current_pos + label_len > buf.len() {
                     return Err(UmbraError::DnsProtectionFailed(
@@ -388,7 +394,18 @@ impl DnsController {
                 if !jumped {
                     *pos = current_pos;
                 }
+            } else {
+                return Err(UmbraError::DnsProtectionFailed(format!(
+                    "unsupported or reserved DNS label format 0x{len:02x}"
+                )));
             }
+        }
+
+        let total_len: usize = labels.iter().map(|l| l.len() + 1).sum();
+        if total_len > 255 {
+            return Err(UmbraError::DnsProtectionFailed(
+                "decompressed DNS name exceeds 255 octets limit".to_string(),
+            ));
         }
 
         Ok(labels.join("."))
@@ -418,7 +435,12 @@ impl DnsController {
         let rdata = buf[*pos..*pos + rdlength].to_vec();
         *pos += rdlength;
 
-        let ip_addr = if rtype == 1 && rdlength == 4 {
+        let ip_addr = if rtype == 1 {
+            if rdlength != 4 {
+                return Err(UmbraError::DnsProtectionFailed(format!(
+                    "malformed A record with RDLENGTH {rdlength} (expected 4)"
+                )));
+            }
             Some(Ipv4Addr::new(rdata[0], rdata[1], rdata[2], rdata[3]))
         } else {
             None
@@ -450,12 +472,26 @@ impl DnsController {
             .parse()
             .map_err(|_| UmbraError::DnsProtectionFailed("invalid socket address".to_string()))?;
 
-        // Generate query ID based on time / address
-        let query_id = (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0xABCD)
-            & 0xFFFF) as u16;
+        // Cryptographically secure random query ID with fallback to timestamp
+        let mut id_bytes = [0u8; 2];
+        let query_id = if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            use std::io::Read;
+            if f.read_exact(&mut id_bytes).is_ok() {
+                u16::from_ne_bytes(id_bytes)
+            } else {
+                (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0xABCD)
+                    & 0xFFFF) as u16
+            }
+        } else {
+            (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0xABCD)
+                & 0xFFFF) as u16
+        };
 
         let query_packet = Self::build_query(domain, query_id)?;
 
@@ -465,14 +501,30 @@ impl DnsController {
             ))
         })?;
 
-        let mut buf = [0u8; 512];
+        // Support full EDNS UDP buffer capacity (4096 bytes)
+        let mut buf = [0u8; 4096];
         let (bytes_read, _) = socket.recv_from(&mut buf).map_err(|e| {
             UmbraError::DnsProtectionFailed(format!(
                 "no response from local Tor DNSPort {target_addr}: {e}"
             ))
         })?;
 
-        Self::parse_response(&buf[..bytes_read], Some(query_id))
+        let response = Self::parse_response(&buf[..bytes_read], Some(query_id))?;
+
+        // Verify question name matches queried domain
+        let clean_domain = domain.trim_end_matches('.');
+        if !response.questions.is_empty()
+            && !response.questions[0]
+                .name
+                .eq_ignore_ascii_case(clean_domain)
+        {
+            return Err(UmbraError::DnsProtectionFailed(format!(
+                "DNS question mismatch: expected {clean_domain}, received {}",
+                response.questions[0].name
+            )));
+        }
+
+        Ok(response)
     }
 
     /// Verifies that DNS resolution works locally via Tor DNSPort (`127.0.0.1:port`).
@@ -512,7 +564,7 @@ impl DnsController {
                         if !Self::is_loopback_address(&ns_str) {
                             public_or_remote_nameservers.push(ns_str.clone());
                             warnings.push(format!(
-                                "Configured nameserver '{ns_str}' is non-loopback. While Umbra firewall intercepts outbound port 53, standard applications relying on unintercepted DNS or systemd-resolved could experience timeouts or leakage risks if firewall is down. Consider setting nameserver 127.0.0.1."
+                                "Configured nameserver '{ns_str}' is non-loopback. While Umbra firewall intercepts outbound port 53, standard applications relying on unintercepted DNS or systemd-resolved could experience timeouts or leakage risks if firewall is down. A loopback resolver configuration (127.0.0.1 or 127.0.0.53) is recommended."
                             ));
                         }
                     }
@@ -577,11 +629,10 @@ impl DnsController {
 
     /// Checks if a string represents an IPv4 or IPv6 loopback address.
     pub fn is_loopback_address(addr_str: &str) -> bool {
-        if let Ok(ip) = addr_str.parse::<IpAddr>() {
-            ip.is_loopback()
-        } else {
-            addr_str.starts_with("127.") || addr_str == "::1"
-        }
+        addr_str
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
     }
 
     fn rcode_to_str(rcode: u8) -> &'static str {

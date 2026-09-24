@@ -412,3 +412,224 @@ fn test_mock_local_dnsport_timeout() {
     assert!(res.is_err());
     assert!(matches!(res, Err(UmbraError::DnsProtectionFailed(_))));
 }
+
+#[test]
+fn test_parse_response_large_response_edns() {
+    // Construct a synthetic large DNS response (>512 bytes) with 10 A records and an EDNS0 OPT RR
+    let mut packet = Vec::new();
+    packet.extend_from_slice(&[0x12, 0x34]); // ID
+    packet.extend_from_slice(&[0x81, 0x80]); // QR=1, RCODE=0
+    packet.extend_from_slice(&[0x00, 0x01]); // QDCOUNT=1
+    packet.extend_from_slice(&[0x00, 0x0A]); // ANCOUNT=10
+    packet.extend_from_slice(&[0x00, 0x00]); // NSCOUNT=0
+    packet.extend_from_slice(&[0x00, 0x01]); // ARCOUNT=1 (EDNS OPT)
+
+    // Question: check.torproject.org
+    packet.push(5);
+    packet.extend_from_slice(b"check");
+    packet.push(10);
+    packet.extend_from_slice(b"torproject");
+    packet.push(3);
+    packet.extend_from_slice(b"org");
+    packet.push(0);
+    packet.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+
+    // 10 Answer records
+    for i in 0..10u8 {
+        packet.extend_from_slice(&[0xC0, 0x0C]); // pointer to name
+        packet.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]); // Type A, Class IN
+        packet.extend_from_slice(&[0x00, 0x00, 0x01, 0x00]); // TTL 256
+        packet.extend_from_slice(&[0x00, 0x04]); // RDLENGTH 4
+        packet.extend_from_slice(&[10, 0, 0, i]); // IP
+    }
+
+    // EDNS(0) OPT RR in additionals
+    packet.push(0x00); // Root name
+    packet.extend_from_slice(&[0x00, 0x29]); // Type 41 (OPT)
+    packet.extend_from_slice(&[0x10, 0x00]); // UDP payload size 4096
+    packet.extend_from_slice(&[0x00, 0x00, 0x80, 0x00]); // DO bit set
+    packet.extend_from_slice(&[0x00, 0x00]); // RDLENGTH 0
+
+    let parsed =
+        DnsController::parse_response(&packet, Some(0x1234)).expect("parse large response");
+    assert_eq!(parsed.answers.len(), 10);
+    assert!(parsed.edns.is_some());
+    assert_eq!(parsed.edns.unwrap().udp_payload_size, 4096);
+    assert_eq!(parsed.answers[9].ip_addr, Some(Ipv4Addr::new(10, 0, 0, 9)));
+}
+
+#[test]
+fn test_concurrent_dns_resolution() {
+    // Ephemeral mock server handling multiple concurrent requests
+    let server_sock = UdpSocket::bind("127.0.0.1:0").expect("bind concurrent mock");
+    let server_port = server_sock.local_addr().unwrap().port();
+    let num_requests = 10;
+
+    let server_handle = std::thread::spawn(move || {
+        for _ in 0..num_requests {
+            let mut buf = [0u8; 512];
+            let (n, peer) = server_sock.recv_from(&mut buf).expect("recv concurrent");
+            let query_id = u16::from_be_bytes([buf[0], buf[1]]);
+
+            let mut resp = Vec::new();
+            resp.extend_from_slice(&query_id.to_be_bytes());
+            resp.extend_from_slice(&[0x81, 0x80]);
+            resp.extend_from_slice(&[0x00, 0x01]);
+            resp.extend_from_slice(&[0x00, 0x01]);
+            resp.extend_from_slice(&[0x00, 0x00]);
+            resp.extend_from_slice(&[0x00, 0x00]);
+            resp.extend_from_slice(&buf[12..n]);
+            resp.extend_from_slice(&[0xC0, 0x0C]);
+            resp.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+            resp.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]);
+            resp.extend_from_slice(&[0x00, 0x04]);
+            resp.extend_from_slice(&[127, 0, 0, 1]);
+
+            server_sock
+                .send_to(&resp, peer)
+                .expect("send concurrent reply");
+        }
+    });
+
+    let mut handles = Vec::new();
+    for _ in 0..num_requests {
+        let handle = std::thread::spawn(move || {
+            let res = DnsController::test_dns_resolution(
+                server_port,
+                "check.torproject.org",
+                Duration::from_secs(2),
+            );
+            assert!(res.is_ok(), "Concurrent DNS resolution failed: {:?}", res);
+        });
+        handles.push(handle);
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+    server_handle.join().unwrap();
+}
+
+#[test]
+fn test_parse_name_reserved_format_rejected() {
+    let mut packet = Vec::new();
+    packet.extend_from_slice(&[0x11, 0x22]); // ID
+    packet.extend_from_slice(&[0x81, 0x80]); // QR=1
+    packet.extend_from_slice(&[0x00, 0x01]); // QDCOUNT=1
+    packet.extend_from_slice(&[0x00, 0x00]);
+    packet.extend_from_slice(&[0x00, 0x00]);
+    packet.extend_from_slice(&[0x00, 0x00]);
+
+    // Label with reserved format bits 01 (0x40)
+    packet.push(0x40);
+    packet.extend_from_slice(b"invalid");
+
+    let err = DnsController::parse_response(&packet, Some(0x1122)).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("unsupported or reserved DNS label format"));
+}
+
+#[test]
+fn test_parse_name_decompression_bomb_rejected() {
+    let mut packet = Vec::new();
+    packet.extend_from_slice(&[0x33, 0x44]); // ID
+    packet.extend_from_slice(&[0x81, 0x80]);
+    packet.extend_from_slice(&[0x00, 0x01]);
+    packet.extend_from_slice(&[0x00, 0x00]);
+    packet.extend_from_slice(&[0x00, 0x00]);
+    packet.extend_from_slice(&[0x00, 0x00]);
+
+    // Create a 60-byte label at offset 12
+    let long_label = [b'a'; 60];
+    packet.push(60);
+    packet.extend_from_slice(&long_label);
+    // Chain multiple pointers to produce >255 bytes decompressed
+    // Offset 12: len 60, then 60 bytes of 'a' -> offset 73
+    // At offset 73: pointer to offset 12
+    packet.extend_from_slice(&[0xC0, 0x0C]);
+
+    let _ = DnsController::parse_response(&packet, Some(0x3344));
+    // Either cycle detected or name exceeds 255 octets limit
+}
+
+#[test]
+fn test_parse_record_malformed_a_record_rejected() {
+    let mut packet = Vec::new();
+    packet.extend_from_slice(&[0x55, 0x55]);
+    packet.extend_from_slice(&[0x81, 0x80]);
+    packet.extend_from_slice(&[0x00, 0x00]);
+    packet.extend_from_slice(&[0x00, 0x01]); // 1 answer
+    packet.extend_from_slice(&[0x00, 0x00]);
+    packet.extend_from_slice(&[0x00, 0x00]);
+
+    packet.push(4);
+    packet.extend_from_slice(b"test");
+    packet.push(0);
+    packet.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]); // Type A, Class IN
+    packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]); // TTL 60
+    packet.extend_from_slice(&[0x00, 0x05]); // Malformed RDLENGTH 5 (expected 4 for A record)
+    packet.extend_from_slice(&[192, 0, 2, 1, 99]); // 5 bytes
+
+    let err = DnsController::parse_response(&packet, Some(0x5555)).unwrap_err();
+    assert!(err.to_string().contains("malformed A record"));
+}
+
+#[test]
+fn test_dns_resolution_question_mismatch_rejected() {
+    let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let server_port = server_sock.local_addr().unwrap().port();
+
+    let server_handle = std::thread::spawn(move || {
+        let mut buf = [0u8; 512];
+        let (_, peer) = server_sock.recv_from(&mut buf).unwrap();
+        let query_id = u16::from_be_bytes([buf[0], buf[1]]);
+
+        // Server returns an answer for "evil.com" instead of the queried domain
+        let mut resp = Vec::new();
+        resp.extend_from_slice(&query_id.to_be_bytes());
+        resp.extend_from_slice(&[0x81, 0x80]);
+        resp.extend_from_slice(&[0x00, 0x01]);
+        resp.extend_from_slice(&[0x00, 0x01]);
+        resp.extend_from_slice(&[0x00, 0x00]);
+        resp.extend_from_slice(&[0x00, 0x00]);
+        // Question: evil.com
+        resp.push(4);
+        resp.extend_from_slice(b"evil");
+        resp.push(3);
+        resp.extend_from_slice(b"com");
+        resp.push(0);
+        resp.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+        // Answer
+        resp.extend_from_slice(&[0xC0, 0x0C]);
+        resp.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+        resp.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]);
+        resp.extend_from_slice(&[0x00, 0x04]);
+        resp.extend_from_slice(&[1, 2, 3, 4]);
+
+        server_sock.send_to(&resp, peer).unwrap();
+    });
+
+    let res = DnsController::test_dns_resolution(
+        server_port,
+        "check.torproject.org",
+        Duration::from_secs(1),
+    );
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(err.to_string().contains("question mismatch"));
+
+    server_handle.join().unwrap();
+}
+
+#[test]
+fn test_resolv_conf_parser_hostname_bypass_rejected() {
+    let content = r#"
+nameserver 127.evil.com
+nameserver 127.0.0.1.bad.org
+"#;
+    let diag = DnsController::parse_resolv_conf(content);
+    assert!(!diag.loopback_only);
+    assert_eq!(diag.public_or_remote_nameservers.len(), 2);
+    assert_eq!(diag.warnings.len(), 2);
+}

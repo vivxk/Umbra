@@ -51,6 +51,23 @@ fn test_firewall_rule_generation() {
 
     // Fail-closed drops
     assert!(ruleset.contains("meta l4proto udp drop"));
+
+    // Verify critical rule ordering invariants:
+    // 1. UDP DNS redirection must occur before loopback return so queries to 127.0.0.1:53 or 127.0.0.53:53 are intercepted
+    let dns_redirect_pos = ruleset.find("udp dport 53 redirect").unwrap();
+    let lo_return_pos = ruleset.find("oif \"lo\" return").unwrap();
+    assert!(
+        dns_redirect_pos < lo_return_pos,
+        "DNS redirect must precede loopback return in output_nat"
+    );
+
+    // 2. IPv6 TCP DNS drop must occur before TCP port 53 reset so IPv6 DNS queries are dropped fail-closed
+    let ipv6_tcp_drop_pos = ruleset.find("meta nfproto ipv6 tcp dport 53 drop").unwrap();
+    let tcp53_rst_pos = ruleset.find("tcp dport 53 reject with tcp reset").unwrap();
+    assert!(
+        ipv6_tcp_drop_pos < tcp53_rst_pos,
+        "IPv6 TCP DNS drop must precede TCP 53 reset in output_filter"
+    );
 }
 
 #[test]
