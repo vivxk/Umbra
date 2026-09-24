@@ -1,6 +1,8 @@
 .PHONY: all build install uninstall test lint clippy fmt check clean
 
 CARGO ?= cargo
+DESTDIR ?=
+PREFIX ?= /usr
 
 all: build
 
@@ -19,10 +21,18 @@ fmt:
 	$(CARGO) fmt --check
 
 install: build
-	@sudo bash scripts/install.sh
+	@if [ "$$(id -u)" -eq 0 ]; then \
+		DESTDIR="$(DESTDIR)" PREFIX="$(PREFIX)" bash scripts/install.sh; \
+	else \
+		sudo DESTDIR="$(DESTDIR)" PREFIX="$(PREFIX)" bash scripts/install.sh; \
+	fi
 
 uninstall:
-	@sudo bash scripts/uninstall.sh
+	@if [ "$$(id -u)" -eq 0 ]; then \
+		DESTDIR="$(DESTDIR)" PREFIX="$(PREFIX)" bash scripts/uninstall.sh; \
+	else \
+		sudo DESTDIR="$(DESTDIR)" PREFIX="$(PREFIX)" bash scripts/uninstall.sh; \
+	fi
 
 clean:
 	$(CARGO) clean

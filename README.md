@@ -94,12 +94,15 @@ cd umbra
 
 # Build release binary and install to system
 sudo make install
+
+# Packagers can specify custom staging destination and prefix:
+# make install DESTDIR=/tmp/staging PREFIX=/usr
 ```
 
 The installer performs the following actions:
 1. Compiles the optimized release binary (`cargo build --release`).
 2. Installs the executable to `/usr/bin/umbra` with permissions `0755` (and symlinks `/usr/local/bin/umbra`).
-3. Installs the Tor configuration fragment to `/etc/tor/torrc.d/umbra.conf` (authenticated with `# umbra-managed`).
+3. Installs the Tor configuration fragment to `/etc/tor/torrc.d/umbra.conf` (authenticated with `# umbra-managed`). Refuses symlinks and unmanaged file overwrites. Writes atomically.
 4. Installs the systemd unit template to `/etc/systemd/system/umbra-boot.service`.
 
 ### 2. Verify Tor Configuration
@@ -204,6 +207,12 @@ Umbra includes a comprehensive automated test suite. Privileged network tests ex
 
 ```bash
 cargo test
+```
+
+### Run Packaging & Lifecycle Test Suite
+
+```bash
+cargo test --test packaging
 ```
 
 ### Run Static Analysis and Linter Checks

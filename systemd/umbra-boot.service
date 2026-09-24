@@ -4,7 +4,6 @@ Documentation=https://github.com/umbra/umbra
 After=network.target tor.service
 Wants=tor.service
 Before=network-online.target
-DefaultDependencies=no
 
 [Service]
 Type=oneshot

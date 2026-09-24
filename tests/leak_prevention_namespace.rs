@@ -17,6 +17,11 @@ const MOCK_CONTROLPORT: u16 = 19051;
 const LEAK_IFACE: &str = "leak_dummy0";
 
 fn setup_leak_test_env() -> (FirewallConfig, String) {
+    // 0. Ensure loopback interface is UP in the isolated namespace
+    let _ = Command::new("ip")
+        .args(["link", "set", "dev", "lo", "up"])
+        .status();
+
     // 1. Create dummy egress interface
     let _ = Command::new("ip")
         .args(["link", "add", "dev", LEAK_IFACE, "type", "dummy"])
@@ -220,41 +225,40 @@ fn test_leak_direct_ipv6_egress_dropped_immediately() {
     FirewallController::install(&config).expect("install firewall");
 
     // A. IPv6 UDP to external destination
-    if let Ok(sock) = UdpSocket::bind("[::]:0") {
-        let res = sock.send_to(b"IPV6_EGRESS_UDP", "[2001:db8::100]:1234");
-        assert!(
-            res.is_err(),
-            "External IPv6 UDP egress must be immediately dropped"
-        );
-        let code = res.unwrap_err().raw_os_error();
-        assert!(
-            code == Some(1) || code == Some(101),
-            "Kernel must return EPERM (1) or ENETUNREACH (101) for dropped IPv6 UDP: {code:?}"
-        );
+    let sock = UdpSocket::bind("[::]:0").expect("bind ipv6 udp socket in netns");
+    let res = sock.send_to(b"IPV6_EGRESS_UDP", "[2001:db8::100]:1234");
+    assert!(
+        res.is_err(),
+        "External IPv6 UDP egress must be immediately dropped"
+    );
+    let code = res.unwrap_err().raw_os_error();
+    assert!(
+        code == Some(1) || code == Some(101),
+        "Kernel must return EPERM (1) or ENETUNREACH (101) for dropped IPv6 UDP: {code:?}"
+    );
 
-        // B. IPv6 UDP DNS (both external and loopback)
-        let dns_res = sock.send_to(b"IPV6_DNS_QUERY", "[2001:db8::100]:53");
-        assert!(
-            dns_res.is_err(),
-            "IPv6 UDP DNS to external port 53 must be immediately dropped"
-        );
-        let dns_code = dns_res.unwrap_err().raw_os_error();
-        assert!(
-            dns_code == Some(1) || dns_code == Some(101),
-            "Kernel must return EPERM or ENETUNREACH for dropped IPv6 external DNS: {dns_code:?}"
-        );
+    // B. IPv6 UDP DNS (both external and loopback)
+    let dns_res = sock.send_to(b"IPV6_DNS_QUERY", "[2001:db8::100]:53");
+    assert!(
+        dns_res.is_err(),
+        "IPv6 UDP DNS to external port 53 must be immediately dropped"
+    );
+    let dns_code = dns_res.unwrap_err().raw_os_error();
+    assert!(
+        dns_code == Some(1) || dns_code == Some(101),
+        "Kernel must return EPERM or ENETUNREACH for dropped IPv6 external DNS: {dns_code:?}"
+    );
 
-        let loopback_dns_res = sock.send_to(b"IPV6_DNS_QUERY", "[::1]:53");
-        assert!(
-            loopback_dns_res.is_err(),
-            "IPv6 UDP DNS to loopback port 53 must be dropped with EPERM"
-        );
-        assert_eq!(
-            loopback_dns_res.unwrap_err().raw_os_error(),
-            Some(1),
-            "Kernel must return EPERM for dropped IPv6 loopback DNS"
-        );
-    }
+    let loopback_dns_res = sock.send_to(b"IPV6_DNS_QUERY", "[::1]:53");
+    assert!(
+        loopback_dns_res.is_err(),
+        "IPv6 UDP DNS to loopback port 53 must be dropped with EPERM"
+    );
+    assert_eq!(
+        loopback_dns_res.unwrap_err().raw_os_error(),
+        Some(1),
+        "Kernel must return EPERM for dropped IPv6 loopback DNS"
+    );
 
     // C. IPv6 TCP to external destination ([2001:db8::100]:80)
     let tcp_res = TcpStream::connect_timeout(
@@ -650,12 +654,14 @@ fn test_leak_tor_failure_injection_fail_closed() {
     );
 
     // D. IPv6 egress remains completely blocked
-    if let Ok(sock6) = UdpSocket::bind("[::]:0") {
-        let v6_res = sock6.send_to(b"IPV6_FAIL_CLOSED", "[2001:db8::100]:80");
-        assert!(v6_res.is_err());
-        let code = v6_res.unwrap_err().raw_os_error();
-        assert!(code == Some(1) || code == Some(101));
-    }
+    let sock6 = UdpSocket::bind("[::]:0").expect("bind ipv6 udp socket in failure injection");
+    let v6_res = sock6.send_to(b"IPV6_FAIL_CLOSED", "[2001:db8::100]:80");
+    assert!(v6_res.is_err(), "IPv6 must fail closed during Tor failure");
+    let code = v6_res.unwrap_err().raw_os_error();
+    assert!(
+        code == Some(1) || code == Some(101),
+        "Kernel returns EPERM (1) or ENETUNREACH (101) for IPv6 during Tor failure: {code:?}"
+    );
 
     // Phase 3: TOR RECOVERY
     // When Tor is restored, traffic safely resumes without leaving fail-closed boundary
