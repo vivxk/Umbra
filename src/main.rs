@@ -60,25 +60,16 @@ fn handle_start(interface_override: Option<String>) -> Result<()> {
     );
 
     // 3. Resolve Tor Identity
-    let tor_ident = TorController::find_tor_process()?;
-    let tor_uid = match tor_ident {
-        Some(ref ident) => {
-            println!(
-                "[+] Tor process verified: PID {} (UID {}, exe: {})",
-                ident.pid, ident.uid, ident.exe_path
-            );
-            ident.uid
-        }
-        None => {
-            let uid = TorController::resolve_tor_uid()?;
-            println!("[+] Tor identity resolved: UID {uid}");
-            uid
-        }
-    };
+    let tor_ident = TorController::find_tor_process()?.ok_or(UmbraError::TorNotRunning)?;
+    println!(
+        "[+] Tor process verified: PID {} (UID {}, exe: {})",
+        tor_ident.pid, tor_ident.uid, tor_ident.exe_path
+    );
+    let tor_uid = tor_ident.uid;
 
     // 4. Verify Tor prerequisites
-    TorController::verify_transport_with_identity(DEFAULT_TOR_TRANSPORT, tor_ident.as_ref())?;
-    TorController::verify_dnsport_with_identity(DEFAULT_TOR_DNSPORT, tor_ident.as_ref())?;
+    TorController::verify_transport_with_identity(DEFAULT_TOR_TRANSPORT, Some(&tor_ident))?;
+    TorController::verify_dnsport_with_identity(DEFAULT_TOR_DNSPORT, Some(&tor_ident))?;
     println!("[+] Tor listeners verified (TransPort:{DEFAULT_TOR_TRANSPORT}, DNSPort:{DEFAULT_TOR_DNSPORT})");
 
     // 5. Generate and Apply Randomized MAC

@@ -76,22 +76,35 @@ impl TorConfig {
             ));
         }
 
-        if !path.exists() {
-            return Ok(());
-        }
+        if path.exists() {
+            // Verify resolved canonical target is not main torrc
+            if let Ok(canonical) = fs::canonicalize(path) {
+                if canonical
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .map(|f| f == "torrc")
+                    .unwrap_or(false)
+                {
+                    return Err(UmbraError::TorConfigOwnershipMismatch(
+                        "refusing to treat symlink pointing to main 'torrc' as an Umbra fragment"
+                            .to_string(),
+                    ));
+                }
+            }
 
-        let content = fs::read_to_string(path).map_err(|e| {
-            UmbraError::TorConfigOwnershipMismatch(format!(
-                "cannot read fragment at {}: {e}",
-                path.display()
-            ))
-        })?;
+            let content = fs::read_to_string(path).map_err(|e| {
+                UmbraError::TorConfigOwnershipMismatch(format!(
+                    "cannot read fragment at {}: {e}",
+                    path.display()
+                ))
+            })?;
 
-        if !content.contains("# umbra-managed") {
-            return Err(UmbraError::TorConfigOwnershipMismatch(format!(
-                "file at {} exists but is missing '# umbra-managed' ownership tag",
-                path.display()
-            )));
+            if !content.contains("# umbra-managed") {
+                return Err(UmbraError::TorConfigOwnershipMismatch(format!(
+                    "file at {} exists but is missing '# umbra-managed' ownership tag",
+                    path.display()
+                )));
+            }
         }
 
         Ok(())
@@ -100,6 +113,13 @@ impl TorConfig {
     /// Installs or updates an Umbra configuration fragment atomically
     pub fn install_fragment(path: &Path, config: &TorConfig) -> Result<()> {
         Self::verify_fragment_ownership(path)?;
+
+        if path.is_symlink() {
+            return Err(UmbraError::TorConfigOwnershipMismatch(format!(
+                "refusing to overwrite symlink at {}; configuration fragment must be a regular file",
+                path.display()
+            )));
+        }
 
         if let Some(parent) = path.parent() {
             if !parent.exists() {
@@ -132,8 +152,21 @@ impl TorConfig {
             ));
         }
 
-        if !path.exists() {
+        if !path.exists() && !path.is_symlink() {
             return Ok(());
+        }
+
+        if let Ok(canonical) = fs::canonicalize(path) {
+            if canonical
+                .file_name()
+                .and_then(|f| f.to_str())
+                .map(|f| f == "torrc")
+                .unwrap_or(false)
+            {
+                return Err(UmbraError::TorConfigOwnershipMismatch(
+                    "refusing to remove symlink pointing to main 'torrc'".to_string(),
+                ));
+            }
         }
 
         Self::verify_fragment_ownership(path)?;
@@ -195,17 +228,32 @@ pub fn parse_proc_net_sockets(content: &str) -> Vec<SocketEntry> {
     content.lines().filter_map(parse_proc_net_line).collect()
 }
 
-/// Finds matching socket entry in a proc net file (e.g. `/proc/net/tcp`)
+/// Finds matching socket entry in a proc net file (e.g. `/proc/net/tcp` or `/proc/net/udp`)
 pub fn find_socket_in_proc_net(proc_net_file: &Path, port: u16) -> Result<Option<SocketEntry>> {
     let content = match fs::read_to_string(proc_net_file) {
         Ok(c) => c,
         Err(_) => return Ok(None),
     };
 
+    let is_udp = proc_net_file
+        .file_name()
+        .and_then(|f| f.to_str())
+        .map(|s| s.contains("udp"))
+        .unwrap_or(false);
+
     let entries = parse_proc_net_sockets(&content);
-    let matched = entries
-        .into_iter()
-        .find(|e| e.local_port == port && (e.state == 0x0A || e.state == 0x07));
+    let matched = entries.into_iter().find(|e| {
+        if e.local_port != port {
+            return false;
+        }
+        if is_udp {
+            // In Linux /proc/net/udp, listening/bound sockets are state 0x07 (TCP_CLOSE)
+            e.state == 0x07
+        } else {
+            // In Linux /proc/net/tcp, listening sockets are state 0x0A (TCP_LISTEN)
+            e.state == 0x0A
+        }
+    });
 
     Ok(matched)
 }
@@ -263,19 +311,28 @@ pub fn verify_socket_ownership(
             return Err(UmbraError::TorListenerPortClosed {
                 port,
                 details: format!(
-                    "no listener found for port {port} in {}",
+                    "no listener found for port {port} in {} (port closed)",
                     proc_net_file.display()
                 ),
             });
         }
     };
 
+    // Reject root-owned Tor socket unconditionally (Section 15)
+    if socket.uid == 0 {
+        return Err(UmbraError::TorRunningAsRoot);
+    }
+
     // Check bind address: must be local-only 127.0.0.1
     if socket.local_ip != [127, 0, 0, 1] {
-        return Err(UmbraError::TorControlError(format!(
-            "listener on port {port} is not bound to local-only 127.0.0.1 (bound to {}.{}.{}.{})",
-            socket.local_ip[0], socket.local_ip[1], socket.local_ip[2], socket.local_ip[3]
-        )));
+        return Err(UmbraError::TorListenerWrongProcess {
+            port,
+            expected: "local loopback 127.0.0.1".to_string(),
+            actual: format!(
+                "bound to {}.{}.{}.{}",
+                socket.local_ip[0], socket.local_ip[1], socket.local_ip[2], socket.local_ip[3]
+            ),
+        });
     }
 
     // Check UID if expected
@@ -291,7 +348,34 @@ pub fn verify_socket_ownership(
 
     // Check PID if expected
     if let Some(exp_pid) = expected_pid {
-        if let Ok(Some((owner_pid, owner_comm))) = find_socket_inode_owner(proc_dir, socket.inode) {
+        let exp_pid_fd = proc_dir.join(exp_pid.to_string()).join("fd");
+        if exp_pid_fd.exists() {
+            let mut owns_socket = false;
+            let target_socket_str = format!("socket:[{}]", socket.inode);
+            if let Ok(entries) = fs::read_dir(&exp_pid_fd) {
+                for entry in entries.flatten() {
+                    if let Ok(target) = fs::read_link(entry.path()) {
+                        if target.to_string_lossy() == target_socket_str {
+                            owns_socket = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !owns_socket {
+                let actual = match find_socket_inode_owner(proc_dir, socket.inode) {
+                    Ok(Some((owner_pid, owner_comm))) => format!("{owner_comm} (PID {owner_pid})"),
+                    _ => "unknown or different process".to_string(),
+                };
+                return Err(UmbraError::TorListenerWrongProcess {
+                    port,
+                    expected: format!("Tor PID {exp_pid}"),
+                    actual,
+                });
+            }
+        } else if let Ok(Some((owner_pid, owner_comm))) =
+            find_socket_inode_owner(proc_dir, socket.inode)
+        {
             if owner_pid != exp_pid {
                 return Err(UmbraError::TorListenerWrongProcess {
                     port,
@@ -325,13 +409,15 @@ pub fn verify_executable_security_with_config(
         ))
     })?;
 
-    // Check prefix
-    let in_trusted_path = trusted_prefixes.iter().any(|prefix| {
-        let prefix_path = Path::new(prefix);
-        canonical.starts_with(prefix_path) || exe_path.starts_with(prefix_path)
-    });
+    // Both canonical target and original path must reside in trusted paths
+    let canonical_in_trusted = trusted_prefixes
+        .iter()
+        .any(|prefix| canonical.starts_with(Path::new(prefix)));
+    let exe_in_trusted = trusted_prefixes
+        .iter()
+        .any(|prefix| exe_path.starts_with(Path::new(prefix)));
 
-    if !in_trusted_path {
+    if !canonical_in_trusted || !exe_in_trusted {
         return Err(UmbraError::TorExecutableUntrusted(format!(
             "executable {} (canonical: {}) does not reside in trusted root-owned paths ({:?})",
             exe_path.display(),
@@ -371,6 +457,14 @@ pub fn verify_executable_security_with_config(
         if (mode & 0o022) != 0 {
             return Err(UmbraError::TorExecutableUntrusted(format!(
                 "executable {} has insecure permissions (mode {:04o}): group- or world-writable",
+                canonical.display(),
+                mode & 0o7777
+            )));
+        }
+
+        if (mode & 0o6000) != 0 {
+            return Err(UmbraError::TorExecutableUntrusted(format!(
+                "executable {} has SUID/SGID bit set (mode {:04o}); Tor must not be setuid/setgid",
                 canonical.display(),
                 mode & 0o7777
             )));
@@ -472,9 +566,20 @@ pub fn extract_cookie_path_from_protocolinfo(lines: &[String]) -> Option<String>
     for line in lines {
         if let Some(pos) = line.find("COOKIEFILE=\"") {
             let remainder = &line[pos + 12..];
-            if let Some(end) = remainder.find('\"') {
-                return Some(remainder[..end].to_string());
+            let mut result = String::new();
+            let mut chars = remainder.chars();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    if let Some(escaped) = chars.next() {
+                        result.push(escaped);
+                    }
+                } else if c == '\"' {
+                    return Some(result);
+                } else {
+                    result.push(c);
+                }
             }
+            return Some(result);
         } else if let Some(pos) = line.find("COOKIEFILE=") {
             let remainder = &line[pos + 11..];
             let end = remainder
@@ -574,13 +679,19 @@ impl TorController {
                 if let Ok(comm) = fs::read_to_string(&comm_path) {
                     let comm_clean = comm.trim();
                     if comm_clean == "tor" || comm_clean == "tor.real" {
-                        let ident = Self::verify_tor_process_at(
+                        match Self::verify_tor_process_at(
                             proc_dir,
                             pid,
                             expected_owner_uid,
                             trusted_prefixes,
-                        )?;
-                        return Ok(Some(ident));
+                        ) {
+                            Ok(ident) => return Ok(Some(ident)),
+                            Err(UmbraError::TorRunningAsRoot) => {
+                                return Err(UmbraError::TorRunningAsRoot)
+                            }
+                            Err(UmbraError::TorProcessNotFound(_)) => continue,
+                            Err(e) => return Err(e),
+                        }
                     }
                 }
             }
@@ -653,11 +764,36 @@ impl TorController {
         for line in content.lines() {
             if line.starts_with("Uid:") {
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let real_uid = parts[1].parse::<u32>().map_err(|_| {
-                        UmbraError::TorIdentityUnknown("invalid Uid field in status".to_string())
+                if parts.len() >= 5 {
+                    // Uid: <real> <effective> <saved> <fs>
+                    let ruid = parts[1].parse::<u32>().map_err(|_| {
+                        UmbraError::TorIdentityUnknown("invalid real Uid in status".to_string())
                     })?;
-                    return Ok(real_uid);
+                    let euid = parts[2].parse::<u32>().map_err(|_| {
+                        UmbraError::TorIdentityUnknown(
+                            "invalid effective Uid in status".to_string(),
+                        )
+                    })?;
+                    let suid = parts[3].parse::<u32>().map_err(|_| {
+                        UmbraError::TorIdentityUnknown("invalid saved Uid in status".to_string())
+                    })?;
+                    let fsuid = parts[4].parse::<u32>().map_err(|_| {
+                        UmbraError::TorIdentityUnknown("invalid fs Uid in status".to_string())
+                    })?;
+
+                    if ruid == 0 || euid == 0 || suid == 0 || fsuid == 0 {
+                        return Err(UmbraError::TorRunningAsRoot);
+                    }
+
+                    return Ok(euid);
+                } else if parts.len() >= 2 {
+                    let uid = parts[1].parse::<u32>().map_err(|_| {
+                        UmbraError::TorIdentityUnknown("invalid Uid in status".to_string())
+                    })?;
+                    if uid == 0 {
+                        return Err(UmbraError::TorRunningAsRoot);
+                    }
+                    return Ok(uid);
                 }
             }
         }
@@ -684,15 +820,13 @@ impl TorController {
         let stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500));
         match stream {
             Ok(_) => {
-                if let Some(ident) = expected {
-                    verify_socket_ownership(
-                        Path::new("/proc/net/tcp"),
-                        Path::new("/proc"),
-                        port,
-                        Some(ident.uid),
-                        Some(ident.pid),
-                    )?;
-                }
+                verify_socket_ownership(
+                    Path::new("/proc/net/tcp"),
+                    Path::new("/proc"),
+                    port,
+                    expected.map(|i| i.uid),
+                    expected.map(|i| i.pid),
+                )?;
                 Ok(())
             }
             Err(e) => {
@@ -777,21 +911,27 @@ impl TorController {
 
         let mut buf = [0u8; 512];
         match socket.recv(&mut buf) {
-            Ok(bytes_read) if bytes_read > 0 => {
-                if let Some(ident) = expected {
-                    verify_socket_ownership(
-                        Path::new("/proc/net/udp"),
-                        Path::new("/proc"),
+            Ok(bytes_read) if bytes_read >= 12 => {
+                if buf[0] != 0x12 || buf[1] != 0x34 {
+                    return Err(UmbraError::TorListenerWrongProcess {
                         port,
-                        Some(ident.uid),
-                        Some(ident.pid),
-                    )?;
+                        expected: "valid DNS response matching query transaction ID".to_string(),
+                        actual: format!("mismatched transaction ID: {:02x}{:02x}", buf[0], buf[1]),
+                    });
                 }
+                verify_socket_ownership(
+                    Path::new("/proc/net/udp"),
+                    Path::new("/proc"),
+                    port,
+                    expected.map(|i| i.uid),
+                    expected.map(|i| i.pid),
+                )?;
                 Ok(())
             }
-            Ok(_) => Err(UmbraError::TorListenerMissing {
+            Ok(_) => Err(UmbraError::TorListenerWrongProcess {
                 port,
-                details: "received 0 bytes from DNSPort".to_string(),
+                expected: "DNS header (>= 12 bytes)".to_string(),
+                actual: "truncated response (< 12 bytes)".to_string(),
             }),
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::ConnectionRefused
@@ -830,37 +970,13 @@ impl TorController {
         port: u16,
         expected: Option<&TorIdentity>,
     ) -> Result<()> {
-        let tcp_table = Path::new("/proc/net/tcp");
-        if tcp_table.exists() {
-            if let Ok(Some(sock)) = find_socket_in_proc_net(tcp_table, port) {
-                if sock.local_ip != [127, 0, 0, 1] {
-                    return Err(UmbraError::TorControlError(format!(
-                        "ControlPort {port} is not bound to local-only 127.0.0.1 (bound to {}.{}.{}.{})",
-                        sock.local_ip[0], sock.local_ip[1], sock.local_ip[2], sock.local_ip[3]
-                    )));
-                }
-                if let Some(ident) = expected {
-                    if sock.uid != ident.uid {
-                        return Err(UmbraError::TorListenerWrongProcess {
-                            port,
-                            expected: format!("Tor UID {}", ident.uid),
-                            actual: format!("UID {}", sock.uid),
-                        });
-                    }
-                    if let Ok(Some((owner_pid, owner_comm))) =
-                        find_socket_inode_owner(Path::new("/proc"), sock.inode)
-                    {
-                        if owner_pid != ident.pid {
-                            return Err(UmbraError::TorListenerWrongProcess {
-                                port,
-                                expected: format!("Tor PID {} (tor)", ident.pid),
-                                actual: format!("{owner_comm} (PID {owner_pid})"),
-                            });
-                        }
-                    }
-                }
-            }
-        }
+        verify_socket_ownership(
+            Path::new("/proc/net/tcp"),
+            Path::new("/proc"),
+            port,
+            expected.map(|i| i.uid),
+            expected.map(|i| i.pid),
+        )?;
 
         let addr = format!("{LOCAL_LOOPBACK_IPV4}:{port}");
         let socket_addr: SocketAddr = addr
@@ -924,6 +1040,13 @@ impl TorController {
                 expected: "Tor ControlPort protocol (RFC 250)".to_string(),
                 actual: format!("protocol error: {p}"),
             },
+            UmbraError::TorControlError(msg) if msg.contains("closed") => {
+                UmbraError::TorListenerWrongProcess {
+                    port,
+                    expected: "Tor ControlPort protocol (RFC 250)".to_string(),
+                    actual: format!("connection closed prematurely: {msg}"),
+                }
+            }
             other => other,
         })?;
 
@@ -935,12 +1058,15 @@ impl TorController {
             });
         }
 
+        let _ = reader.get_mut().write_all(b"QUIT\r\n");
+
         Ok(())
     }
 
     /// Sends authenticated SIGNAL NEWNYM to Tor ControlPort
     pub fn request_newnym(port: u16) -> Result<()> {
-        Self::request_newnym_with_options(port, None, None)
+        let ident = Self::find_tor_process()?.ok_or(UmbraError::TorNotRunning)?;
+        Self::request_newnym_with_options(port, Some(&ident), None)
     }
 
     /// Sends authenticated SIGNAL NEWNYM to Tor ControlPort with explicit options
@@ -949,38 +1075,13 @@ impl TorController {
         expected_identity: Option<&TorIdentity>,
         custom_cookie_path: Option<&Path>,
     ) -> Result<()> {
-        // Verify socket ownership in procfs if available
-        let tcp_table = Path::new("/proc/net/tcp");
-        if tcp_table.exists() {
-            if let Ok(Some(sock)) = find_socket_in_proc_net(tcp_table, port) {
-                if sock.local_ip != [127, 0, 0, 1] {
-                    return Err(UmbraError::TorControlError(format!(
-                        "ControlPort {port} is not bound to local-only 127.0.0.1 (bound to {}.{}.{}.{})",
-                        sock.local_ip[0], sock.local_ip[1], sock.local_ip[2], sock.local_ip[3]
-                    )));
-                }
-                if let Some(ident) = expected_identity {
-                    if sock.uid != ident.uid {
-                        return Err(UmbraError::TorListenerWrongProcess {
-                            port,
-                            expected: format!("Tor UID {}", ident.uid),
-                            actual: format!("UID {}", sock.uid),
-                        });
-                    }
-                    if let Ok(Some((owner_pid, owner_comm))) =
-                        find_socket_inode_owner(Path::new("/proc"), sock.inode)
-                    {
-                        if owner_pid != ident.pid {
-                            return Err(UmbraError::TorListenerWrongProcess {
-                                port,
-                                expected: format!("Tor PID {} (tor)", ident.pid),
-                                actual: format!("{owner_comm} (PID {owner_pid})"),
-                            });
-                        }
-                    }
-                }
-            }
-        }
+        verify_socket_ownership(
+            Path::new("/proc/net/tcp"),
+            Path::new("/proc"),
+            port,
+            expected_identity.map(|i| i.uid),
+            expected_identity.map(|i| i.pid),
+        )?;
 
         let addr = format!("{LOCAL_LOOPBACK_IPV4}:{port}");
         let socket_addr: SocketAddr = addr
@@ -1047,6 +1148,13 @@ impl TorController {
                 expected: "Tor ControlPort protocol (RFC 250)".to_string(),
                 actual: format!("protocol error: {p}"),
             },
+            UmbraError::TorControlError(msg) if msg.contains("closed") => {
+                UmbraError::TorListenerWrongProcess {
+                    port,
+                    expected: "Tor ControlPort protocol (RFC 250)".to_string(),
+                    actual: format!("connection closed prematurely: {msg}"),
+                }
+            }
             other => other,
         })?;
 
@@ -1062,10 +1170,23 @@ impl TorController {
         // 2. Locate auth cookie
         let mut cookie_bytes = None;
         if let Some(path) = custom_cookie_path {
-            if let Ok(mut f) = fs::File::open(path) {
-                let mut bytes = Vec::new();
-                if f.read_to_end(&mut bytes).is_ok() && !bytes.is_empty() {
-                    cookie_bytes = Some(bytes);
+            match fs::File::open(path) {
+                Ok(mut f) => {
+                    let mut bytes = Vec::new();
+                    if f.read_to_end(&mut bytes).is_ok() && !bytes.is_empty() {
+                        cookie_bytes = Some(bytes);
+                    } else {
+                        return Err(UmbraError::TorControlAuthFailed(format!(
+                            "custom cookie file at {} is empty or unreadable",
+                            path.display()
+                        )));
+                    }
+                }
+                Err(e) => {
+                    return Err(UmbraError::TorControlAuthFailed(format!(
+                        "failed to open custom cookie file at {}: {e}",
+                        path.display()
+                    )));
                 }
             }
         }

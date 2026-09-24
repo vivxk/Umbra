@@ -194,6 +194,86 @@ fn test_executable_real_system_tor_if_installed() {
     }
 }
 
+#[test]
+fn test_executable_symlink_pointing_to_untrusted_target_rejected() {
+    let trusted_dir = tempdir().unwrap();
+    let untrusted_dir = tempdir().unwrap();
+
+    let real_exe = untrusted_dir.path().join("evil_tor");
+    fs::write(&real_exe, b"mock_evil_binary").unwrap();
+    fs::set_permissions(&real_exe, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let symlink_in_trusted = trusted_dir.path().join("tor");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real_exe, &symlink_in_trusted).unwrap();
+
+    let my_uid = nix::unistd::getuid().as_raw();
+    let res = verify_executable_security_with_config(
+        &symlink_in_trusted,
+        Some(my_uid),
+        &[trusted_dir.path().to_str().unwrap()],
+    );
+
+    match res {
+        Err(UmbraError::TorExecutableUntrusted(msg)) => {
+            assert!(msg.contains("does not reside in trusted root-owned paths"));
+        }
+        other => {
+            panic!("expected TorExecutableUntrusted for symlink to untrusted target, got {other:?}")
+        }
+    }
+}
+
+#[test]
+fn test_executable_untrusted_symlink_pointing_to_trusted_binary_rejected() {
+    let trusted_dir = tempdir().unwrap();
+    let untrusted_dir = tempdir().unwrap();
+
+    let real_exe = trusted_dir.path().join("tor");
+    fs::write(&real_exe, b"mock_tor_binary").unwrap();
+    fs::set_permissions(&real_exe, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let symlink_in_untrusted = untrusted_dir.path().join("tor_link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real_exe, &symlink_in_untrusted).unwrap();
+
+    let my_uid = nix::unistd::getuid().as_raw();
+    let res = verify_executable_security_with_config(
+        &symlink_in_untrusted,
+        Some(my_uid),
+        &[trusted_dir.path().to_str().unwrap()],
+    );
+
+    match res {
+        Err(UmbraError::TorExecutableUntrusted(msg)) => {
+            assert!(msg.contains("does not reside in trusted root-owned paths"));
+        }
+        other => {
+            panic!("expected TorExecutableUntrusted for untrusted symlink path, got {other:?}")
+        }
+    }
+}
+
+#[test]
+fn test_executable_suid_rejected() {
+    let dir = tempdir().unwrap();
+    let trusted_prefix = dir.path().to_str().unwrap();
+    let exe_path = dir.path().join("tor_suid");
+    fs::write(&exe_path, b"mock").unwrap();
+    // 0o4755 has SUID bit set
+    fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o4755)).unwrap();
+
+    let my_uid = nix::unistd::getuid().as_raw();
+    let res = verify_executable_security_with_config(&exe_path, Some(my_uid), &[trusted_prefix]);
+
+    match res {
+        Err(UmbraError::TorExecutableUntrusted(msg)) => {
+            assert!(msg.contains("SUID/SGID bit set"));
+        }
+        other => panic!("expected TorExecutableUntrusted for SUID binary, got {other:?}"),
+    }
+}
+
 // ============================================================================
 // 2. Process Inspection & UID Hardening Tests
 // ============================================================================
@@ -276,6 +356,38 @@ fn test_process_running_as_root_rejected() {
     match res {
         Err(UmbraError::TorRunningAsRoot) => {}
         other => panic!("expected TorRunningAsRoot, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_process_effective_uid_root_rejected() {
+    let proc_dir = tempdir().unwrap();
+    let exe_dir = tempdir().unwrap();
+    let exe_path = exe_dir.path().join("tor");
+    fs::write(&exe_path, b"binary").unwrap();
+    fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let pid_dir = proc_dir.path().join("103");
+    fs::create_dir_all(&pid_dir).unwrap();
+    fs::write(pid_dir.join("comm"), "tor\n").unwrap();
+    // Real UID = 122, Effective UID = 0 (root)
+    fs::write(
+        pid_dir.join("status"),
+        "Name:\ttor\nUid:\t122\t0\t122\t122\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&exe_path, pid_dir.join("exe")).unwrap();
+
+    let res = TorController::verify_tor_process_at(
+        proc_dir.path(),
+        103,
+        None,
+        &[exe_dir.path().to_str().unwrap()],
+    );
+    match res {
+        Err(UmbraError::TorRunningAsRoot) => {}
+        other => panic!("expected TorRunningAsRoot for effective UID 0, got {other:?}"),
     }
 }
 
@@ -543,6 +655,58 @@ fn test_tor_config_refuses_main_torrc() {
     }
 }
 
+#[test]
+fn test_tor_config_refuses_symlink_to_main_torrc() {
+    let dir = tempdir().unwrap();
+    let torrc_path = dir.path().join("torrc");
+    fs::write(&torrc_path, "# main system torrc\n").unwrap();
+
+    let symlink_path = dir.path().join("umbra.conf");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&torrc_path, &symlink_path).unwrap();
+
+    // Verify ownership check fails on symlink to main torrc
+    let res = TorConfig::verify_fragment_ownership(&symlink_path);
+    match res {
+        Err(UmbraError::TorConfigOwnershipMismatch(msg)) => {
+            assert!(msg.contains("symlink pointing to main 'torrc'"));
+        }
+        other => panic!("expected TorConfigOwnershipMismatch for symlink to torrc, got {other:?}"),
+    }
+
+    // Verify remove refuses symlink to main torrc
+    let res_del = TorConfig::remove_fragment(&symlink_path);
+    match res_del {
+        Err(UmbraError::TorConfigOwnershipMismatch(msg)) => {
+            assert!(msg.contains("symlink pointing to main 'torrc'"));
+        }
+        other => panic!("expected TorConfigOwnershipMismatch on remove, got {other:?}"),
+    }
+
+    // Verify main torrc was preserved
+    assert!(torrc_path.exists());
+}
+
+#[test]
+fn test_tor_config_install_refuses_symlink() {
+    let dir = tempdir().unwrap();
+    let target_file = dir.path().join("target.conf");
+    fs::write(&target_file, "# umbra-managed\n").unwrap();
+
+    let symlink_path = dir.path().join("fragment.conf");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target_file, &symlink_path).unwrap();
+
+    let config = TorConfig::default();
+    let res = TorConfig::install_fragment(&symlink_path, &config);
+    match res {
+        Err(UmbraError::TorConfigOwnershipMismatch(msg)) => {
+            assert!(msg.contains("refusing to overwrite symlink"));
+        }
+        other => panic!("expected TorConfigOwnershipMismatch for symlink install, got {other:?}"),
+    }
+}
+
 // ============================================================================
 // 4. Socket Parsing & Listener State Tests
 // ============================================================================
@@ -674,10 +838,82 @@ fn test_verify_socket_ownership_remote_bind_rejected() {
 
     let res = verify_socket_ownership(&tcp_file, dir.path(), 9051, None, None);
     match res {
+        Err(UmbraError::TorListenerWrongProcess { actual, .. }) => {
+            assert!(actual.contains("0.0.0.0"));
+        }
         Err(UmbraError::TorControlError(msg)) => {
             assert!(msg.contains("not bound to local-only 127.0.0.1"));
         }
-        other => panic!("expected TorControlError for remote bind, got {other:?}"),
+        other => panic!(
+            "expected TorListenerWrongProcess or TorControlError for remote bind, got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn test_verify_socket_ownership_root_uid_rejected() {
+    let dir = tempdir().unwrap();
+    let tcp_file = dir.path().join("tcp");
+    // UID 0 (root) on port 9040
+    let content = "   0: 0100007F:2350 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 29052 1 00000000b761d09b 100 0 0 10 0\n";
+    fs::write(&tcp_file, content).unwrap();
+
+    let res = verify_socket_ownership(&tcp_file, dir.path(), 9040, None, None);
+    match res {
+        Err(UmbraError::TorRunningAsRoot) => {}
+        other => panic!("expected TorRunningAsRoot for UID 0 socket, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_tcp_socket_in_closed_state_not_matched_as_listener() {
+    let dir = tempdir().unwrap();
+    let tcp_file = dir.path().join("tcp");
+    // State 07 (TCP_CLOSE) on port 9040
+    let content = "   0: 0100007F:2350 00000000:0000 07 00000000:00000000 00:00000000 00000000   122        0 29052 1 00000000b761d09b 100 0 0 10 0\n";
+    fs::write(&tcp_file, content).unwrap();
+
+    let res = verify_socket_ownership(&tcp_file, dir.path(), 9040, None, None);
+    match res {
+        Err(UmbraError::TorListenerPortClosed { port, details }) => {
+            assert_eq!(port, 9040);
+            assert!(details.contains("port closed") || details.contains("no listener"));
+        }
+        other => panic!("expected TorListenerPortClosed for TCP_CLOSE state socket, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_verify_socket_ownership_pid_does_not_own_inode_rejected() {
+    let dir = tempdir().unwrap();
+    let tcp_file = dir.path().join("tcp");
+    // Inode 77777 on port 9040
+    let content = "   0: 0100007F:2350 00000000:0000 0A 00000000:00000000 00:00000000 00000000   122        0 77777 1 00000000b761d09b 100 0 0 10 0\n";
+    fs::write(&tcp_file, content).unwrap();
+
+    // Tor PID 500 has fd/3 -> socket:[11111], NOT socket:[77777]
+    let pid_dir = dir.path().join("500");
+    let fd_dir = pid_dir.join("fd");
+    fs::create_dir_all(&fd_dir).unwrap();
+    fs::write(pid_dir.join("comm"), "tor\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("socket:[11111]", fd_dir.join("3")).unwrap();
+
+    // Verification must fail because Tor (PID 500) does not own socket 77777
+    let res = verify_socket_ownership(&tcp_file, dir.path(), 9040, Some(122), Some(500));
+    match res {
+        Err(UmbraError::TorListenerWrongProcess {
+            port,
+            expected,
+            actual,
+        }) => {
+            assert_eq!(port, 9040);
+            assert!(expected.contains("500"));
+            assert!(actual.contains("unknown") || actual.contains("different"));
+        }
+        other => panic!(
+            "expected TorListenerWrongProcess when expected PID doesn't own socket, got {other:?}"
+        ),
     }
 }
 
@@ -887,7 +1123,12 @@ fn test_controlport_closed_port_detected() {
     match res {
         Err(UmbraError::TorListenerPortClosed { port, details }) => {
             assert_eq!(port, closed_port);
-            assert!(details.contains("refused") || details.contains("failed"));
+            assert!(
+                details.contains("refused")
+                    || details.contains("failed")
+                    || details.contains("port closed")
+                    || details.contains("no listener")
+            );
         }
         other => panic!("expected TorListenerPortClosed, got {other:?}"),
     }
@@ -929,4 +1170,158 @@ fn test_transport_closed_port_detected() {
         }
         other => panic!("expected TorListenerPortClosed, got {other:?}"),
     }
+}
+
+#[test]
+fn test_custom_cookie_path_missing_fails() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server_handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap(); // PROTOCOLINFO 1
+        stream
+            .write_all(b"250-PROTOCOLINFO 1\r\n250-AUTH METHODS=COOKIE\r\n250 OK\r\n")
+            .unwrap();
+    });
+
+    let non_existent_cookie = Path::new("/non/existent/cookie/path");
+    let res = TorController::request_newnym_with_options(port, None, Some(non_existent_cookie));
+
+    match res {
+        Err(UmbraError::TorControlAuthFailed(msg)) => {
+            assert!(msg.contains("failed to open custom cookie file"));
+        }
+        other => {
+            panic!("expected TorControlAuthFailed for non-existent cookie file, got {other:?}")
+        }
+    }
+
+    server_handle.join().unwrap();
+}
+
+#[test]
+fn test_request_newnym_fails_when_tor_not_running() {
+    // If Tor process is not running on development host, request_newnym must fail-closed with TorNotRunning
+    // or fail to find process
+    let ident = TorController::find_tor_process();
+    if ident.is_ok() && ident.unwrap().is_none() {
+        let res = TorController::request_newnym(9051);
+        match res {
+            Err(UmbraError::TorNotRunning) => {}
+            other => panic!("expected TorNotRunning when Tor is not running, got {other:?}"),
+        }
+    }
+}
+
+// ============================================================================
+// 6. DNSPort Verification Tests
+// ============================================================================
+
+#[test]
+fn test_dnsport_closed_port_detected() {
+    // Bind and immediately drop UDP socket to find an unused port
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let closed_port = socket.local_addr().unwrap().port();
+    drop(socket);
+
+    let res = TorController::verify_dnsport_with_identity(closed_port, None);
+    match res {
+        Err(UmbraError::TorListenerPortClosed { port, details }) => {
+            assert_eq!(port, closed_port);
+            assert!(
+                details.contains("refused")
+                    || details.contains("failed")
+                    || details.contains("closed")
+            );
+        }
+        Err(UmbraError::TorListenerTimeout { port, .. }) => {
+            // Some environments drop ICMP unreachable and time out
+            assert_eq!(port, closed_port);
+        }
+        other => {
+            panic!("expected TorListenerPortClosed or Timeout for closed DNSPort, got {other:?}")
+        }
+    }
+}
+
+#[test]
+fn test_mock_dnsport_success() {
+    let server_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = server_socket.local_addr().unwrap().port();
+
+    let server_handle = thread::spawn(move || {
+        let mut buf = [0u8; 512];
+        let (bytes_read, client_addr) = server_socket.recv_from(&mut buf).unwrap();
+        assert!(bytes_read >= 12);
+
+        // Echo back valid DNS response with QR bit set (0x8180 = standard response, no error)
+        let mut response = buf[..bytes_read].to_vec();
+        response[2] = 0x81;
+        response[3] = 0x80;
+        server_socket.send_to(&response, client_addr).unwrap();
+        // Keep socket open while client verifies socket ownership
+        thread::sleep(Duration::from_millis(500));
+    });
+
+    let res = TorController::verify_dnsport_with_identity(port, None);
+    assert!(res.is_ok(), "mock DNSPort query should succeed: {res:?}");
+
+    server_handle.join().unwrap();
+}
+
+#[test]
+fn test_dnsport_timeout_detected() {
+    let server_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = server_socket.local_addr().unwrap().port();
+
+    let server_handle = thread::spawn(move || {
+        let mut buf = [0u8; 512];
+        let _ = server_socket.recv_from(&mut buf);
+        // Sleep without sending response to induce client timeout
+        thread::sleep(Duration::from_millis(800));
+    });
+
+    let res = TorController::verify_dnsport_with_identity(port, None);
+    match res {
+        Err(UmbraError::TorListenerTimeout { port: p, details }) => {
+            assert_eq!(p, port);
+            assert!(details.contains("timed out"));
+        }
+        other => panic!("expected TorListenerTimeout for non-responding DNSPort, got {other:?}"),
+    }
+
+    server_handle.join().unwrap();
+}
+
+#[test]
+fn test_dnsport_wrong_response_rejected() {
+    let server_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = server_socket.local_addr().unwrap().port();
+
+    let server_handle = thread::spawn(move || {
+        let mut buf = [0u8; 512];
+        let (_bytes_read, client_addr) = server_socket.recv_from(&mut buf).unwrap();
+        // Send corrupt / invalid DNS packet (< 12 bytes or wrong transaction ID)
+        server_socket.send_to(b"ERR", client_addr).unwrap();
+    });
+
+    let res = TorController::verify_dnsport_with_identity(port, None);
+    match res {
+        Err(UmbraError::TorListenerWrongProcess {
+            port: p,
+            expected,
+            actual,
+        }) => {
+            assert_eq!(p, port);
+            assert!(expected.contains("DNS"));
+            assert!(actual.contains("truncated") || actual.contains("mismatched"));
+        }
+        other => panic!("expected TorListenerWrongProcess for corrupt DNS response, got {other:?}"),
+    }
+
+    server_handle.join().unwrap();
 }
