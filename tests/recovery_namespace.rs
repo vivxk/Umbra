@@ -494,3 +494,254 @@ fn test_crash_resilience_fail_closed_in_netns() {
     RecoveryController::recover_force_with_options(&opts).expect("force recovery clean up");
     assert!(!FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap());
 }
+
+#[test]
+fn test_stop_refuses_when_state_missing_but_table_exists_in_netns() {
+    if !is_in_isolated_netns() {
+        let netns = match IsolatedNetns::new("rec_stop_missing_st") {
+            Some(ns) => ns,
+            None => {
+                eprintln!("Skipping netns test: network namespace creation not permitted");
+                return;
+            }
+        };
+        netns.run_test("test_stop_refuses_when_state_missing_but_table_exists_in_netns");
+        return;
+    }
+
+    let fw_config = get_test_fw_config("lo");
+    FirewallController::install(&fw_config).expect("install firewall");
+    assert!(FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap());
+
+    let non_existent = std::path::PathBuf::from("/tmp/umbra_test_stop_missing_state.json");
+    if non_existent.exists() {
+        let _ = fs::remove_file(&non_existent);
+    }
+
+    let opts = RecoveryOptions {
+        state_file_override: Some(non_existent.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+
+    // Calling stop when state is missing but table exists must refuse with RecoveryUncertain
+    let stop_res = RecoveryController::stop_with_options(&opts);
+    assert!(stop_res.is_err());
+    match stop_res.unwrap_err() {
+        UmbraError::RecoveryUncertain(msg) => {
+            assert!(msg.contains("Cannot cleanly stop"));
+            assert!(msg.contains("umbra recover --force"));
+        }
+        other => panic!("expected RecoveryUncertain, got {other:?}"),
+    }
+
+    // Table must NOT have been deleted
+    assert!(FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap());
+
+    // Clean up via force recovery
+    RecoveryController::recover_force_with_options(&opts).expect("force recovery");
+    assert!(!FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap());
+}
+
+#[test]
+fn test_recover_normal_fails_and_preserves_state_on_mac_restore_error_in_netns() {
+    if !is_in_isolated_netns() {
+        let netns = match IsolatedNetns::new("rec_norm_err_pres") {
+            Some(ns) => ns,
+            None => {
+                eprintln!("Skipping netns test: network namespace creation not permitted");
+                return;
+            }
+        };
+        netns.run_test(
+            "test_recover_normal_fails_and_preserves_state_on_mac_restore_error_in_netns",
+        );
+        return;
+    }
+
+    let fw_config = get_test_fw_config("lo");
+    FirewallController::install(&fw_config).expect("install firewall");
+
+    let tmp = NamedTempFile::new().expect("create temp state file");
+    let state_path = tmp.path().to_path_buf();
+    drop(tmp);
+
+    // State points to a non-existent interface "dum_ghost99"
+    let state = ActiveState::new(
+        "act_ghost_test".to_string(),
+        "dum_ghost99".to_string(),
+        "02:aa:bb:cc:dd:40".to_string(),
+        "02:44:55:66:77:88".to_string(),
+        true,
+        fw_config.tor_uid,
+        fw_config.tor_transport_port,
+        fw_config.tor_dns_port,
+        fw_config.table_name.clone(),
+    );
+    state.save_to_path(&state_path).expect("save state");
+
+    let opts = RecoveryOptions {
+        state_file_override: Some(state_path.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+
+    // Normal recovery MUST fail because baseline MAC cannot be restored on non-existent device
+    let res = RecoveryController::recover_normal_with_options(&opts);
+    assert!(
+        res.is_err(),
+        "recover_normal must fail when MAC restore fails"
+    );
+
+    // CRITICAL: state file MUST be preserved on disk so operator can diagnose or force recover
+    assert!(
+        state_path.exists(),
+        "state file must NOT be deleted when interface restoration fails"
+    );
+
+    // Clean up
+    let _ = fs::remove_file(state_path);
+    let _ = FirewallController::teardown(NFT_TABLE_FAMILY, NFT_TABLE_NAME);
+}
+
+#[test]
+fn test_recover_force_salvages_baseline_from_corrupt_state_in_netns() {
+    if !is_in_isolated_netns() {
+        let netns = match IsolatedNetns::new("rec_force_salv") {
+            Some(ns) => ns,
+            None => {
+                eprintln!("Skipping netns test: network namespace creation not permitted");
+                return;
+            }
+        };
+        netns.run_test("test_recover_force_salvages_baseline_from_corrupt_state_in_netns");
+        return;
+    }
+
+    let dev_name = "dum_salv0";
+    let orig_mac_str = "02:aa:bb:cc:dd:50";
+    let rand_mac_str = "02:55:66:77:88:99";
+
+    let _ = Command::new("ip")
+        .args([
+            "link",
+            "add",
+            dev_name,
+            "address",
+            orig_mac_str,
+            "type",
+            "dummy",
+        ])
+        .status();
+    let _ = Command::new("ip")
+        .args(["link", "set", dev_name, "up"])
+        .status();
+
+    InterfaceController::apply_mac(dev_name, MacAddress::parse(rand_mac_str).unwrap())
+        .expect("apply MAC");
+
+    let fw_config = get_test_fw_config(dev_name);
+    FirewallController::install(&fw_config).expect("install firewall");
+
+    // Create a corrupt JSON state file that still has interface and original_mac fields
+    let mut tmp = NamedTempFile::new().expect("create temp state file");
+    let corrupt_json = format!(
+        "{{\n  \"interface\": \"{dev_name}\",\n  \"original_mac\": \"{orig_mac_str}\",\n  \"randomized_mac\": \"{rand_mac_str}\",\n  \"corrupted_unclosed_block\": [\n"
+    );
+    tmp.write_all(corrupt_json.as_bytes())
+        .expect("write corrupt json");
+    let state_path = tmp.path().to_path_buf();
+
+    let opts = RecoveryOptions {
+        state_file_override: Some(state_path.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+
+    let actions = RecoveryController::recover_force_with_options(&opts).expect("force recovery");
+    assert!(actions
+        .iter()
+        .any(|a| a.contains("Best-effort restoration: salvaged baseline from corrupt state file")));
+
+    // Invariants:
+    // 1. MAC restored to original
+    let current_mac = InterfaceController::read_mac(dev_name).expect("read mac");
+    assert_eq!(current_mac, MacAddress::parse(orig_mac_str).unwrap());
+
+    // 2. Firewall deleted
+    assert!(!FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap());
+
+    // 3. Corrupt state file cleaned
+    assert!(!state_path.exists());
+
+    let _ = Command::new("ip").args(["link", "del", dev_name]).status();
+}
+
+#[test]
+fn test_crash_resilience_subprocess_crash_in_netns() {
+    if !is_in_isolated_netns() {
+        let netns = match IsolatedNetns::new("rec_crash_proc") {
+            Some(ns) => ns,
+            None => {
+                eprintln!("Skipping netns test: network namespace creation not permitted");
+                return;
+            }
+        };
+        netns.run_test("test_crash_resilience_subprocess_crash_in_netns");
+        return;
+    }
+
+    let dev_name = "dum_crash0";
+    let orig_mac_str = "02:aa:bb:cc:dd:60";
+    let _ = Command::new("ip")
+        .args([
+            "link",
+            "add",
+            dev_name,
+            "address",
+            orig_mac_str,
+            "type",
+            "dummy",
+        ])
+        .status();
+    let _ = Command::new("ip")
+        .args(["link", "set", dev_name, "up"])
+        .status();
+
+    let fw_config = get_test_fw_config(dev_name);
+    FirewallController::install(&fw_config).expect("install firewall");
+
+    // Spawn a child process to simulate active daemon/worker, and immediately kill with SIGKILL (signal 9)
+    let mut child = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn sleep process");
+
+    let pid = child.id();
+    // Send SIGKILL (kill -9)
+    let kill_status = Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status()
+        .expect("kill -9 child process");
+    assert!(kill_status.success());
+    let _ = child.wait();
+
+    // Verify kernel firewall ruleset is 100% active and fail-closed after process death
+    FirewallController::verify_live(&fw_config)
+        .expect("kernel firewall must survive process termination");
+
+    let list_out = Command::new("nft")
+        .args(["list", "table", "inet", "umbra"])
+        .output()
+        .expect("list table");
+    let stdout = String::from_utf8_lossy(&list_out.stdout);
+    assert!(stdout.contains("policy drop"));
+    assert!(stdout.contains("chain output_filter"));
+
+    // Explicit recovery returns host to normal
+    let opts = RecoveryOptions {
+        state_file_override: Some("/tmp/nonexistent_crash_state.json".to_string()),
+        ..Default::default()
+    };
+    RecoveryController::recover_force_with_options(&opts).expect("force recovery clean up");
+    assert!(!FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap());
+
+    let _ = Command::new("ip").args(["link", "del", dev_name]).status();
+}

@@ -70,13 +70,9 @@ fn handle_start(interface_override: Option<String>) -> Result<()> {
 
 fn handle_stop() -> Result<()> {
     require_root("stop")?;
-    let lock = ProcessLock::acquire()?;
 
     println!("[*] Stopping Umbra and restoring network state...");
     RecoveryController::stop()?;
-
-    drop(lock);
-    let _ = ProcessLock::cleanup();
 
     println!("[✓] Umbra is INACTIVE. Normal networking restored.");
     Ok(())
@@ -146,7 +142,6 @@ fn handle_status() -> Result<()> {
 
 fn handle_recover(force: bool) -> Result<()> {
     require_root("recover")?;
-    let lock = ProcessLock::acquire()?;
 
     let actions = if force {
         println!("[*] Executing force recovery workflow...");
@@ -160,9 +155,6 @@ fn handle_recover(force: bool) -> Result<()> {
     for action in actions {
         println!(" - {action}");
     }
-
-    drop(lock);
-    let _ = ProcessLock::cleanup();
 
     Ok(())
 }

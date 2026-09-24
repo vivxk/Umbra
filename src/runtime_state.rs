@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::RUNTIME_STATE_FILE;
 use crate::error::{Result, UmbraError};
+use crate::mac::MacAddress;
 
 /// High-level lifecycle states per specification
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,9 +105,26 @@ impl ActiveState {
                 "empty interface name".to_string(),
             ));
         }
-        if self.original_mac.trim().is_empty() || self.randomized_mac.trim().is_empty() {
+        let orig_mac = MacAddress::parse(&self.original_mac).map_err(|e| {
+            UmbraError::RuntimeStateCorrupt(format!(
+                "invalid original_mac '{}': {e}",
+                self.original_mac
+            ))
+        })?;
+        if orig_mac.is_all_zeros() {
             return Err(UmbraError::RuntimeStateCorrupt(
-                "empty MAC address".to_string(),
+                "original_mac cannot be all zeros".to_string(),
+            ));
+        }
+        let rand_mac = MacAddress::parse(&self.randomized_mac).map_err(|e| {
+            UmbraError::RuntimeStateCorrupt(format!(
+                "invalid randomized_mac '{}': {e}",
+                self.randomized_mac
+            ))
+        })?;
+        if rand_mac.is_all_zeros() {
+            return Err(UmbraError::RuntimeStateCorrupt(
+                "randomized_mac cannot be all zeros".to_string(),
             ));
         }
         if self.tor_transport_port == 0 || self.tor_dns_port == 0 {

@@ -22,10 +22,14 @@ impl ProcessLock {
     /// Attempts to acquire an exclusive non-blocking lock on /run/umbra/umbra.lock
     #[allow(deprecated)]
     pub fn acquire() -> Result<Self> {
-        let lock_path = Path::new(LOCK_FILE);
+        Self::acquire_path(Path::new(LOCK_FILE))
+    }
 
+    /// Attempts to acquire an exclusive non-blocking lock on a specified path
+    #[allow(deprecated)]
+    pub fn acquire_path(lock_path: &Path) -> Result<Self> {
         if let Some(parent) = lock_path.parent() {
-            if !parent.exists() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
                 fs::create_dir_all(parent).map_err(|e| {
                     UmbraError::LockAcquisitionFailed(format!(
                         "failed to create runtime directory {}: {e}",

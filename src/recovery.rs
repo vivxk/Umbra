@@ -30,6 +30,57 @@ impl Default for RecoveryOptions {
     }
 }
 
+impl RecoveryOptions {
+    pub fn resolved_lock_path(&self) -> std::path::PathBuf {
+        if let Some(ref lock_path) = self.lock_file_override {
+            std::path::PathBuf::from(lock_path)
+        } else if let Some(ref state_path) = self.state_file_override {
+            let p = std::path::Path::new(state_path);
+            p.with_extension("lock")
+        } else {
+            std::path::PathBuf::from(LOCK_FILE)
+        }
+    }
+}
+
+/// Extracts a string field from a JSON string without full deserialization
+pub fn extract_json_field(json: &str, field: &str) -> Option<String> {
+    let key = format!("\"{field}\"");
+    let key_pos = json.find(&key)?;
+    let after_key = &json[key_pos + key.len()..];
+    let colon_pos = after_key.find(':')?;
+    let after_colon = after_key[colon_pos + 1..].trim_start();
+    if let Some(after_quote) = after_colon.strip_prefix('"') {
+        let end_quote = after_quote.find('"')?;
+        Some(after_quote[..end_quote].to_string())
+    } else {
+        None
+    }
+}
+
+/// Attempts best-effort extraction of interface baseline from a corrupt state file
+fn try_salvage_baseline_from_corrupt_file(path: &Path) -> Option<InterfaceBaseline> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let iface = extract_json_field(&content, "interface")?;
+    if iface.trim().is_empty() || iface == "lo" {
+        return None;
+    }
+    let mac_str = extract_json_field(&content, "original_mac")?;
+    let orig_mac = MacAddress::parse(&mac_str).ok()?;
+    if orig_mac.is_all_zeros() {
+        return None;
+    }
+    if !Path::new("/sys/class/net").join(&iface).exists() {
+        return None;
+    }
+    let was_up = InterfaceController::is_administratively_up(&iface).unwrap_or(true);
+    Some(InterfaceBaseline {
+        name: iface,
+        original_mac: orig_mac,
+        was_up,
+    })
+}
+
 pub struct RecoveryController;
 
 impl RecoveryController {
@@ -40,6 +91,9 @@ impl RecoveryController {
 
     /// Executes clean explicit stop workflow with custom options
     pub fn stop_with_options(options: &RecoveryOptions) -> Result<()> {
+        let lock_path = options.resolved_lock_path();
+        let lock = ProcessLock::acquire_path(&lock_path)?;
+
         let state_path = options
             .state_file_override
             .as_deref()
@@ -49,20 +103,15 @@ impl RecoveryController {
         let state = match ActiveState::load_from_path(state_path)? {
             Some(s) => s,
             None => {
-                // If runtime state is absent, inspect if orphaned table exists
+                // If runtime state is absent, check whether an orphaned table exists
                 if FirewallController::table_exists(&options.table_family, &options.table_name)? {
-                    FirewallController::authenticate_ownership(
-                        &options.table_family,
-                        &options.table_name,
-                    )?;
-                    FirewallController::teardown(&options.table_family, &options.table_name)?;
+                    return Err(UmbraError::RecoveryUncertain(
+                        "Cannot cleanly stop: runtime state file is absent but firewall table exists. Interface baseline MAC cannot be restored. Use 'umbra recover --force' to force recovery."
+                            .to_string(),
+                    ));
                 }
-                let lock_path = options
-                    .lock_file_override
-                    .as_deref()
-                    .map(Path::new)
-                    .unwrap_or_else(|| Path::new(LOCK_FILE));
-                let _ = ProcessLock::cleanup_path(lock_path);
+                drop(lock);
+                let _ = ProcessLock::cleanup_path(&lock_path);
                 return Ok(());
             }
         };
@@ -83,13 +132,9 @@ impl RecoveryController {
         // 3. Remove runtime state file only after restoration verification succeeds
         ActiveState::remove_from_path(state_path)?;
 
-        // 4. Clean lock file
-        let lock_path = options
-            .lock_file_override
-            .as_deref()
-            .map(Path::new)
-            .unwrap_or_else(|| Path::new(LOCK_FILE));
-        let _ = ProcessLock::cleanup_path(lock_path);
+        // 4. Release lock, then clean lock file
+        drop(lock);
+        let _ = ProcessLock::cleanup_path(&lock_path);
 
         Ok(())
     }
@@ -109,6 +154,9 @@ impl RecoveryController {
 
     /// Performs normal explicit recovery with custom options
     pub fn recover_normal_with_options(options: &RecoveryOptions) -> Result<Vec<String>> {
+        let lock_path = options.resolved_lock_path();
+        let lock = ProcessLock::acquire_path(&lock_path)?;
+
         let mut actions = Vec::new();
         let state_path = options
             .state_file_override
@@ -146,33 +194,28 @@ impl RecoveryController {
 
         // 2. Reconcile Interface / MAC
         if let Some(state) = loaded_state {
-            match MacAddress::parse(&state.original_mac) {
-                Ok(orig_mac) => {
-                    let baseline = InterfaceBaseline {
-                        name: state.interface.clone(),
-                        original_mac: orig_mac,
-                        was_up: state.interface_was_up,
-                    };
-                    match InterfaceController::restore_baseline(&baseline) {
-                        Ok(_) => actions.push(format!(
-                            "Restored interface {} to original MAC {}",
-                            state.interface, state.original_mac
-                        )),
-                        Err(e) => actions.push(format!(
-                            "Warning: failed to restore interface {}: {e}",
-                            state.interface
-                        )),
-                    }
-                }
-                Err(e) => {
-                    actions.push(format!(
-                        "Warning: invalid original MAC recorded in state ({}): {e}",
-                        state.original_mac
-                    ));
-                }
-            }
+            let orig_mac = MacAddress::parse(&state.original_mac).map_err(|e| {
+                UmbraError::RecoveryUncertain(format!(
+                    "Invalid original MAC recorded in state ({}): {e}. Use 'umbra recover --force' to force recovery.",
+                    state.original_mac
+                ))
+            })?;
 
-            let _ = ActiveState::remove_from_path(state_path);
+            let baseline = InterfaceBaseline {
+                name: state.interface.clone(),
+                original_mac: orig_mac,
+                was_up: state.interface_was_up,
+            };
+
+            // Restoring baseline MUST NOT swallow errors
+            InterfaceController::restore_baseline(&baseline)?;
+            actions.push(format!(
+                "Restored interface {} to original MAC {}",
+                state.interface, state.original_mac
+            ));
+
+            // Only remove state file AFTER successful interface restoration
+            ActiveState::remove_from_path(state_path)?;
             actions.push(format!(
                 "Cleared runtime state file {}",
                 state_path.display()
@@ -181,13 +224,9 @@ impl RecoveryController {
             actions.push("No active runtime state file found to restore MAC".to_string());
         }
 
-        // 3. Clean lock file
-        let lock_path = options
-            .lock_file_override
-            .as_deref()
-            .map(Path::new)
-            .unwrap_or_else(|| Path::new(LOCK_FILE));
-        let _ = ProcessLock::cleanup_path(lock_path);
+        // 3. Release lock and clean lock file
+        drop(lock);
+        let _ = ProcessLock::cleanup_path(&lock_path);
         actions.push("Cleaned lock file".to_string());
 
         Ok(actions)
@@ -210,6 +249,9 @@ impl RecoveryController {
 
     /// Performs force recovery with custom options
     pub fn recover_force_with_options(options: &RecoveryOptions) -> Result<Vec<String>> {
+        let lock_path = options.resolved_lock_path();
+        let lock = ProcessLock::acquire_path(&lock_path)?;
+
         let mut actions = Vec::new();
         let state_path = options
             .state_file_override
@@ -282,9 +324,23 @@ impl RecoveryController {
                 );
             }
             Err(e) => {
-                actions.push(format!(
-                    "Warning: runtime state file was corrupt ({e}); baseline MAC unknown, interface MAC not restored. Please verify network manager or re-plug interface if MAC was changed."
-                ));
+                // Best-effort: attempt to salvage baseline from corrupt state file
+                if let Some(salvaged) = try_salvage_baseline_from_corrupt_file(state_path) {
+                    match InterfaceController::restore_baseline(&salvaged) {
+                        Ok(_) => actions.push(format!(
+                            "Best-effort restoration: salvaged baseline from corrupt state file and restored interface {} to original MAC {}",
+                            salvaged.name, salvaged.original_mac
+                        )),
+                        Err(err) => actions.push(format!(
+                            "Warning: salvaged baseline for interface {} from corrupt state file, but restoration failed: {err}",
+                            salvaged.name
+                        )),
+                    }
+                } else {
+                    actions.push(format!(
+                        "Warning: runtime state file was corrupt ({e}); baseline MAC could not be salvaged or restored. Please verify network manager or re-plug interface if MAC was changed."
+                    ));
+                }
             }
         }
 
@@ -297,13 +353,9 @@ impl RecoveryController {
             ));
         }
 
-        // 4. Clean lock file
-        let lock_path = options
-            .lock_file_override
-            .as_deref()
-            .map(Path::new)
-            .unwrap_or_else(|| Path::new(LOCK_FILE));
-        let _ = ProcessLock::cleanup_path(lock_path);
+        // 4. Release lock, then clean lock file
+        drop(lock);
+        let _ = ProcessLock::cleanup_path(&lock_path);
         actions.push("Cleaned lock file".to_string());
 
         Ok(actions)

@@ -156,3 +156,132 @@ fn test_firewall_authenticate_ruleset_text_strict() {
 
     assert!(FirewallController::authenticate_ruleset_text("").is_err());
 }
+
+#[test]
+fn test_active_state_mac_validation_strict() {
+    let invalid_orig_mac = ActiveState {
+        version: 1,
+        activation_id: "test1".to_string(),
+        interface: "eth0".to_string(),
+        original_mac: "invalid-mac-address".to_string(),
+        randomized_mac: "02:00:00:00:00:02".to_string(),
+        interface_was_up: true,
+        tor_uid: 1000,
+        tor_transport_port: 9040,
+        tor_dns_port: 5353,
+        firewall_identity: "umbra".to_string(),
+        created_at_epoch: 1000,
+    };
+    assert!(invalid_orig_mac.validate().is_err());
+
+    let zero_mac = ActiveState {
+        version: 1,
+        activation_id: "test1".to_string(),
+        interface: "eth0".to_string(),
+        original_mac: "00:00:00:00:00:00".to_string(),
+        randomized_mac: "02:00:00:00:00:02".to_string(),
+        interface_was_up: true,
+        tor_uid: 1000,
+        tor_transport_port: 9040,
+        tor_dns_port: 5353,
+        firewall_identity: "umbra".to_string(),
+        created_at_epoch: 1000,
+    };
+    assert!(zero_mac.validate().is_err());
+}
+
+#[test]
+fn test_recovery_options_resolved_lock_path() {
+    // 1. Default points to LOCK_FILE
+    let default_opts = RecoveryOptions::default();
+    assert_eq!(
+        default_opts.resolved_lock_path().to_string_lossy(),
+        umbra::constants::LOCK_FILE
+    );
+
+    // 2. Explicit lock_file_override is honored
+    let custom_lock_opts = RecoveryOptions {
+        lock_file_override: Some("/tmp/custom.lock".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        custom_lock_opts.resolved_lock_path().to_string_lossy(),
+        "/tmp/custom.lock"
+    );
+
+    // 3. state_file_override isolates lock path if lock_file_override is None
+    let state_opts = RecoveryOptions {
+        state_file_override: Some("/tmp/my_state.json".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        state_opts.resolved_lock_path().to_string_lossy(),
+        "/tmp/my_state.lock"
+    );
+}
+
+#[test]
+fn test_extract_json_field_helpers() {
+    use umbra::recovery::extract_json_field;
+
+    let json = r#"{"interface": "eth0", "original_mac": "02:11:22:33:44:55", "version": 1}"#;
+    assert_eq!(
+        extract_json_field(json, "interface"),
+        Some("eth0".to_string())
+    );
+    assert_eq!(
+        extract_json_field(json, "original_mac"),
+        Some("02:11:22:33:44:55".to_string())
+    );
+    assert_eq!(extract_json_field(json, "nonexistent"), None);
+
+    // Corrupted trailing JSON
+    let damaged = r#"{"interface": "wlan0", "original_mac": "02:aa:bb:cc:dd:ee", broken... "#;
+    assert_eq!(
+        extract_json_field(damaged, "interface"),
+        Some("wlan0".to_string())
+    );
+    assert_eq!(
+        extract_json_field(damaged, "original_mac"),
+        Some("02:aa:bb:cc:dd:ee".to_string())
+    );
+}
+
+#[test]
+fn test_recovery_controller_concurrency_lock() {
+    let tmp = NamedTempFile::new().expect("create temp lock");
+    let lock_path = tmp.path().to_string_lossy().to_string();
+
+    // Acquire lock explicitly
+    let guard = ProcessLock::acquire_path(std::path::Path::new(&lock_path)).expect("acquire lock");
+
+    // RecoveryController must fail while lock is held
+    let opts = RecoveryOptions {
+        lock_file_override: Some(lock_path.clone()),
+        state_file_override: Some("/tmp/nonexistent_rec_conc_test.json".to_string()),
+        ..Default::default()
+    };
+
+    let stop_res = RecoveryController::stop_with_options(&opts);
+    assert!(stop_res.is_err());
+    match stop_res.unwrap_err() {
+        UmbraError::LockAcquisitionFailed(_) => {}
+        other => panic!("expected LockAcquisitionFailed, got {other:?}"),
+    }
+
+    let rec_res = RecoveryController::recover_normal_with_options(&opts);
+    assert!(rec_res.is_err());
+    match rec_res.unwrap_err() {
+        UmbraError::LockAcquisitionFailed(_) => {}
+        other => panic!("expected LockAcquisitionFailed, got {other:?}"),
+    }
+
+    let force_res = RecoveryController::recover_force_with_options(&opts);
+    assert!(force_res.is_err());
+    match force_res.unwrap_err() {
+        UmbraError::LockAcquisitionFailed(_) => {}
+        other => panic!("expected LockAcquisitionFailed, got {other:?}"),
+    }
+
+    drop(guard);
+}
