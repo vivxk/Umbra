@@ -60,6 +60,7 @@ impl FirewallController {
         ip daddr 127.0.0.0/8 return comment "{marker}"
         udp dport 53 redirect to :{tor_dns_port} comment "{marker}"
         tcp dport 53 return comment "{marker}"
+        tcp dport 853 return comment "{marker}"
         tcp dport != {tor_transport_port} redirect to :{tor_transport_port} comment "{marker}"
     }}
 
@@ -68,6 +69,11 @@ impl FirewallController {
         ct state established,related accept comment "{marker}"
         skuid {tor_uid} accept comment "{marker}"
         tcp dport 53 reject with tcp reset comment "{marker}"
+        udp dport 443 drop comment "{marker}"
+        tcp dport 853 drop comment "{marker}"
+        udp dport 853 drop comment "{marker}"
+        meta nfproto ipv6 udp dport 53 drop comment "{marker}"
+        meta nfproto ipv6 tcp dport 53 drop comment "{marker}"
         ip6 daddr != ::1 drop comment "{marker}"
         ip daddr 127.0.0.1 tcp dport {tor_transport_port} accept comment "{marker}"
         ip daddr 127.0.0.1 udp dport {tor_dns_port} accept comment "{marker}"
@@ -288,6 +294,31 @@ impl FirewallController {
         if !ruleset_str.contains("tcp dport 53 reject with tcp reset") {
             return Err(UmbraError::FirewallVerificationFailed(
                 "live ruleset missing tcp dport 53 reset rule".to_string(),
+            ));
+        }
+        if !ruleset_str.contains("udp dport 443 drop") {
+            return Err(UmbraError::FirewallVerificationFailed(
+                "live ruleset missing quic udp 443 drop rule".to_string(),
+            ));
+        }
+        if !ruleset_str.contains("tcp dport 853 drop") {
+            return Err(UmbraError::FirewallVerificationFailed(
+                "live ruleset missing dot tcp 853 drop rule".to_string(),
+            ));
+        }
+        if !ruleset_str.contains("udp dport 853 drop") {
+            return Err(UmbraError::FirewallVerificationFailed(
+                "live ruleset missing dot udp 853 drop rule".to_string(),
+            ));
+        }
+        if !ruleset_str.contains("meta nfproto ipv6 udp dport 53 drop") {
+            return Err(UmbraError::FirewallVerificationFailed(
+                "live ruleset missing ipv6 udp 53 drop rule".to_string(),
+            ));
+        }
+        if !ruleset_str.contains("meta nfproto ipv6 tcp dport 53 drop") {
+            return Err(UmbraError::FirewallVerificationFailed(
+                "live ruleset missing ipv6 tcp 53 drop rule".to_string(),
             ));
         }
         if !ruleset_str.contains("meta l4proto udp drop") {

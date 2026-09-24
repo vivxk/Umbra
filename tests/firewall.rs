@@ -39,6 +39,16 @@ fn test_firewall_rule_generation() {
     assert!(ruleset.contains("tcp dport 53 return"));
     assert!(ruleset.contains("tcp dport 53 reject with tcp reset"));
 
+    // QUIC and DoT drops
+    assert!(ruleset.contains("tcp dport 853 return"));
+    assert!(ruleset.contains("udp dport 443 drop"));
+    assert!(ruleset.contains("tcp dport 853 drop"));
+    assert!(ruleset.contains("udp dport 853 drop"));
+
+    // IPv6 DNS drops
+    assert!(ruleset.contains("meta nfproto ipv6 udp dport 53 drop"));
+    assert!(ruleset.contains("meta nfproto ipv6 tcp dport 53 drop"));
+
     // Fail-closed drops
     assert!(ruleset.contains("meta l4proto udp drop"));
 }

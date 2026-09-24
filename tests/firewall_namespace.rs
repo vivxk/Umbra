@@ -85,6 +85,11 @@ fn test_firewall_lifecycle_isolated_netns() {
     assert!(table_content.contains("redirect to :5353"));
     assert!(table_content.contains("redirect to :9040"));
     assert!(table_content.contains("reject with tcp reset"));
+    assert!(table_content.contains("udp dport 443 drop"));
+    assert!(table_content.contains("tcp dport 853 drop"));
+    assert!(table_content.contains("udp dport 853 drop"));
+    assert!(table_content.contains("meta nfproto ipv6 udp dport 53 drop"));
+    assert!(table_content.contains("meta nfproto ipv6 tcp dport 53 drop"));
     assert!(table_content.contains("meta l4proto udp drop"));
     assert!(table_content.contains("ip6 daddr != ::1 drop"));
 
@@ -401,6 +406,105 @@ fn test_firewall_traffic_redirection_and_blocking_in_netns() {
     let local_server = local_handle.join().expect("join local server");
     drop(local_client);
     drop(local_server);
+
+    // --- Test E: QUIC (UDP/443) packet drop ---
+    let quic_client = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind quic client");
+    let quic_res = quic_client.send_to(b"QUIC_INITIAL_PACKET", "192.0.2.100:443");
+    // Kernel output_filter drop returns EPERM (Os error 1) for locally generated UDP
+    assert!(
+        quic_res.is_err(),
+        "QUIC packet must be dropped by output_filter"
+    );
+    assert_eq!(
+        quic_res.unwrap_err().raw_os_error(),
+        Some(1),
+        "Kernel must return EPERM for dropped QUIC packet"
+    );
+    drop(quic_client);
+
+    // --- Test F: DoT (TCP/853) drop (not redirected to TransPort, dropped by filter) ---
+    let (tx_dot_transport, rx_dot_transport) = std::sync::mpsc::channel();
+    let dot_transport_handle = std::thread::spawn(move || {
+        let listener = std::net::TcpListener::bind("127.0.0.1:19040")
+            .expect("bind mock tor transport listener for dot test");
+        listener.set_nonblocking(true).unwrap();
+        tx_dot_transport.send(()).expect("signal listener ready");
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(300) {
+            if listener.accept().is_ok() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    });
+    rx_dot_transport
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("mock transport listener ready");
+
+    let dot_client_res = std::net::TcpStream::connect_timeout(
+        &"192.0.2.100:853".parse().unwrap(),
+        std::time::Duration::from_millis(200),
+    );
+    assert!(
+        dot_client_res.is_err(),
+        "TCP DoT connection must not succeed directly"
+    );
+
+    let dot_transport_received = dot_transport_handle
+        .join()
+        .expect("join dot transport handle");
+    assert!(
+        !dot_transport_received,
+        "TCP DoT (port 853) must be dropped and NEVER redirected to Tor TransPort"
+    );
+
+    // --- Test G: DoT (UDP/853) drop ---
+    let dot_udp = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind dot udp");
+    let dot_udp_res = dot_udp.send_to(b"DOT_UDP_QUERY", "192.0.2.100:853");
+    assert!(
+        dot_udp_res.is_err(),
+        "DoT UDP packet must be dropped by output_filter"
+    );
+    assert_eq!(
+        dot_udp_res.unwrap_err().raw_os_error(),
+        Some(1),
+        "Kernel must return EPERM for dropped DoT UDP packet"
+    );
+    drop(dot_udp);
+
+    // --- Test H: IPv6 DNS Drop ---
+    if let Ok(sock) = std::net::UdpSocket::bind("[::]:0") {
+        let ipv6_udp_res = sock.send_to(b"IPV6_DNS_QUERY", "[::1]:53");
+        assert!(
+            ipv6_udp_res.is_err(),
+            "IPv6 DNS query over UDP must be dropped"
+        );
+        assert_eq!(
+            ipv6_udp_res.unwrap_err().raw_os_error(),
+            Some(1),
+            "Kernel must return EPERM for dropped IPv6 DNS UDP packet"
+        );
+    }
+    let ipv6_tcp_res = std::net::TcpStream::connect_timeout(
+        &"[::1]:53".parse().unwrap(),
+        std::time::Duration::from_millis(100),
+    );
+    assert!(ipv6_tcp_res.is_err(), "IPv6 DNS over TCP must not connect");
+
+    // --- Test I: Arbitrary Outbound UDP Drop (fail-closed) ---
+    let arbitrary_udp = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind arbitrary udp");
+    let arbitrary_res = arbitrary_udp.send_to(b"ARBITRARY_UDP", "192.0.2.100:12345");
+    assert!(
+        arbitrary_res.is_err(),
+        "Arbitrary outbound UDP must be dropped (fail-closed)"
+    );
+    assert_eq!(
+        arbitrary_res.unwrap_err().raw_os_error(),
+        Some(1),
+        "Kernel must return EPERM for arbitrary dropped UDP"
+    );
+    drop(arbitrary_udp);
 
     // Teardown firewall
     FirewallController::teardown(&config.table_family, &config.table_name).expect("teardown");

@@ -156,6 +156,20 @@ impl LiveVerifier {
             }
         }
 
+        // 7. Safe inspection of /etc/resolv.conf diagnostics
+        if let Ok(resolv) = crate::dns::DnsController::inspect_resolv_conf() {
+            if !resolv.nameservers.is_empty() {
+                details.push(format!(
+                    "dns: /etc/resolv.conf nameservers: {} (loopback-only: {})",
+                    resolv.nameservers.join(", "),
+                    resolv.loopback_only
+                ));
+            }
+            for warning in &resolv.warnings {
+                details.push(format!("dns: [warning] {warning}"));
+            }
+        }
+
         // Determine aggregated status
         let status = match (
             active_state.is_some(),
