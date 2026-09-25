@@ -48,7 +48,9 @@ pub enum UmbraError {
     #[error("Firewall teardown failed: {0}")]
     FirewallTeardownFailed(String),
 
-    #[error("Tor service is not running")]
+    #[error(
+        "Tor service is not running.\n    Please start the Tor service before activating Umbra:\n        sudo systemctl start tor\n    Verify with:\n        sudo systemctl status tor"
+    )]
     TorNotRunning,
 
     #[error("Tor process with PID {0} not found")]
@@ -75,7 +77,9 @@ pub enum UmbraError {
     #[error("Trusted binary resolution failed: {0}")]
     TrustedBinaryNotFound(String),
 
-    #[error("Tor listener port {port} is closed or connection refused: {details}")]
+    #[error(
+        "Tor listener port {port} is closed or connection refused: {details}.\n    Ensure Tor is running with Umbra's configuration fragment enabled:\n        %include /etc/tor/torrc.d/*.conf\n    Then restart Tor:\n        sudo systemctl restart tor"
+    )]
     TorListenerPortClosed { port: u16, details: String },
 
     #[error("Tor listener port {port} connection timed out: {details}")]
