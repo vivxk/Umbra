@@ -164,3 +164,20 @@ pub fn resolve_trusted_command(binary: &str) -> Result<std::process::Command> {
         TRUSTED_BIN_DIRS
     )))
 }
+
+/// Detects whether the application is running inside a WSL (Windows Subsystem for Linux) environment
+pub fn is_wsl_environment() -> bool {
+    if let Ok(release) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
+        let r = release.to_lowercase();
+        if r.contains("microsoft") || r.contains("wsl") {
+            return true;
+        }
+    }
+    if let Ok(version) = std::fs::read_to_string("/proc/version") {
+        let v = version.to_lowercase();
+        if v.contains("microsoft") || v.contains("wsl") {
+            return true;
+        }
+    }
+    false
+}

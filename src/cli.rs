@@ -20,9 +20,13 @@ pub enum Commands {
         #[arg(short, long)]
         interface: Option<String>,
 
-        /// Preserve original MAC address (required in WSL2, Hyper-V, and cloud VMs with MAC anti-spoofing)
-        #[arg(long)]
+        /// Preserve original MAC address (auto-enabled by default in WSL2/Hyper-V)
+        #[arg(long, conflicts_with = "force_mac_randomize")]
         no_mac_randomize: bool,
+
+        /// Force MAC address randomization even in virtualized/WSL environments
+        #[arg(long, conflicts_with = "no_mac_randomize")]
+        force_mac_randomize: bool,
     },
 
     /// Stop Umbra and restore original baseline network configuration

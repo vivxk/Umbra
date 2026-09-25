@@ -7,7 +7,7 @@ use umbra::cli::{Cli, Commands};
 use umbra::constants::{DEFAULT_TOR_CONTROLPORT, DEFAULT_TOR_DNSPORT, DEFAULT_TOR_TRANSPORT};
 use umbra::error::Result;
 use umbra::recovery::RecoveryController;
-use umbra::system::{require_root, ProcessLock};
+use umbra::system::{is_wsl_environment, require_root, ProcessLock};
 use umbra::tor::TorController;
 use umbra::transaction::{StartupTransaction, StartupTransactionOptions};
 use umbra::verify::LiveVerifier;
@@ -26,7 +26,8 @@ fn run_app(cli: Cli) -> Result<()> {
         Commands::Start {
             interface,
             no_mac_randomize,
-        } => handle_start(interface, no_mac_randomize),
+            force_mac_randomize,
+        } => handle_start(interface, no_mac_randomize, force_mac_randomize),
         Commands::Stop => handle_stop(),
         Commands::Status => handle_status(),
         Commands::Recover { normal: _, force } => handle_recover(force),
@@ -39,8 +40,25 @@ fn run_app(cli: Cli) -> Result<()> {
     }
 }
 
-fn handle_start(interface_override: Option<String>, no_mac_randomize: bool) -> Result<()> {
+fn handle_start(
+    interface_override: Option<String>,
+    no_mac_randomize: bool,
+    force_mac_randomize: bool,
+) -> Result<()> {
     require_root("start")?;
+
+    let is_wsl = is_wsl_environment();
+    let should_preserve_mac = if force_mac_randomize {
+        false
+    } else if no_mac_randomize || is_wsl {
+        if is_wsl && !no_mac_randomize {
+            println!("[i] Detected WSL2 environment (Hyper-V virtual switch enforces MAC anti-spoofing).");
+            println!("    Preserving baseline MAC to ensure uninterrupted network connectivity.");
+        }
+        true
+    } else {
+        false
+    };
 
     println!("[*] Initializing Umbra privacy boundary...");
 
@@ -50,15 +68,20 @@ fn handle_start(interface_override: Option<String>, no_mac_randomize: bool) -> R
         dns_port: DEFAULT_TOR_DNSPORT,
         state_file_override: None,
         lock_file_override: None,
-        no_mac_randomize,
+        no_mac_randomize: should_preserve_mac,
     };
 
     let result = StartupTransaction::execute(options)?;
 
     println!("\n[✓] Umbra is ACTIVE");
     println!("    Interface:       {}", result.interface);
-    if no_mac_randomize {
-        println!("    MAC Address:     {} (preserved)", result.original_mac);
+    if should_preserve_mac {
+        let reason = if is_wsl {
+            "WSL2 virtual interface"
+        } else {
+            "preserved"
+        };
+        println!("    MAC Address:     {} ({reason})", result.original_mac);
     } else {
         println!("    Randomized MAC:  {}", result.randomized_mac);
     }

@@ -25,12 +25,38 @@ fn test_cli_parse_start_no_mac_randomize() {
         Commands::Start {
             interface,
             no_mac_randomize,
+            force_mac_randomize,
         } => {
             assert!(interface.is_none());
             assert!(no_mac_randomize);
+            assert!(!force_mac_randomize);
         }
         other => panic!("expected Start command, got {other:?}"),
     }
+
+    let cli2 = Cli::try_parse_from(["umbra", "start", "--force-mac-randomize"])
+        .expect("parse start with force-mac-randomize");
+    match cli2.command {
+        Commands::Start {
+            interface,
+            no_mac_randomize,
+            force_mac_randomize,
+        } => {
+            assert!(interface.is_none());
+            assert!(!no_mac_randomize);
+            assert!(force_mac_randomize);
+        }
+        other => panic!("expected Start command, got {other:?}"),
+    }
+
+    // Both flags together must conflict and fail parsing
+    assert!(Cli::try_parse_from([
+        "umbra",
+        "start",
+        "--no-mac-randomize",
+        "--force-mac-randomize"
+    ])
+    .is_err());
 }
 
 #[test]
