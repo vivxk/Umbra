@@ -88,7 +88,7 @@ Tor TransPort (127.0.0.1:9040)  Tor DNSPort (127.0.0.1:5353)         BLOCKED / D
 
 ```bash
 # Clone the repository
-git clone https://github.com/umbra/umbra.git
+git clone https://github.com/vivxk/Umbra.git
 cd umbra
 
 # Run the installation script (compiles release binary and installs configuration):
