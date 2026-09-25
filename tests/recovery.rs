@@ -63,6 +63,19 @@ fn test_cli_parse_recover_conflict() {
 }
 
 #[test]
+fn test_cli_parse_uninstall() {
+    let cli = Cli::try_parse_from(["umbra", "uninstall"]).expect("parse uninstall");
+    assert_eq!(cli.command, Commands::Uninstall { yes: false });
+
+    let cli_yes =
+        Cli::try_parse_from(["umbra", "uninstall", "--yes"]).expect("parse uninstall --yes");
+    assert_eq!(cli_yes.command, Commands::Uninstall { yes: true });
+
+    let cli_y = Cli::try_parse_from(["umbra", "uninstall", "-y"]).expect("parse uninstall -y");
+    assert_eq!(cli_y.command, Commands::Uninstall { yes: true });
+}
+
+#[test]
 fn test_recovery_options_defaults() {
     let opts = RecoveryOptions::default();
     assert_eq!(opts.state_file_override, None);

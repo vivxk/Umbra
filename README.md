@@ -85,21 +85,18 @@ Tor TransPort (127.0.0.1:9040)  Tor DNSPort (127.0.0.1:5353)         BLOCKED / D
 
 ## Installation
 
-### 1. Build and Install via Makefile
+### 1. Build and Install
 
 ```bash
 # Clone the repository
 git clone https://github.com/umbra/umbra.git
 cd umbra
 
-# Build release binary as a normal user:
-make
+# Run the installation script (compiles release binary and installs configuration):
+sudo ./install.sh
 
-# Install release binary and system configuration as root:
-sudo make install
-
-# Packagers can specify custom staging destination and prefix:
-# make install DESTDIR=/tmp/staging PREFIX=/usr
+# Or install via Makefile:
+# make && sudo make install
 ```
 
 The installer performs the following actions:
@@ -198,21 +195,24 @@ Umbra acts strictly as an operating system network boundary. In accordance with 
 Per Section 89 of the Umbra specification, uninstallation strictly enforces an **inactive check**: it refuses to remove binaries if Umbra is currently active or in an unrecovered state. This prevents orphaned firewall rules or randomized MAC settings from disabling host networking.
 
 ```bash
-# Verify Umbra is stopped first
-sudo umbra stop
+# Easy uninstallation with confirmation prompt:
+sudo umbra uninstall
 
-# Run uninstaller
-sudo make uninstall
-# or:
-sudo bash scripts/uninstall.sh
+# Non-interactive uninstallation (bypass confirmation prompt):
+sudo umbra uninstall --yes
+
+# Or uninstall via Makefile / script:
+# sudo make uninstall
+# sudo bash scripts/uninstall.sh
 ```
 
 The uninstaller:
 1. Verifies that Umbra is completely `INACTIVE` (refuses removal otherwise).
-2. Disables and removes `umbra-boot.service` from systemd.
-3. Verifies ownership and safely removes `/etc/tor/torrc.d/umbra.conf`.
-4. Removes `/usr/bin/umbra` and `/usr/local/bin/umbra`.
-5. Cleans `/run/umbra/`.
+2. Prompts the user for interactive confirmation (unless `--yes` / `-y` is provided).
+3. Disables and removes `umbra-boot.service` from systemd.
+4. Verifies ownership and safely removes `/etc/tor/torrc.d/umbra.conf`.
+5. Removes `/usr/bin/umbra` and `/usr/local/bin/umbra`.
+6. Cleans `/run/umbra/`.
 
 ---
 

@@ -20,7 +20,7 @@ SYSTEMD_DIR="${SYSCONFDIR}/systemd/system"
 
 if [ -z "$DESTDIR" ] && [ "$(id -u)" -ne 0 ]; then
     echo "[!] Error: Installation requires root privileges. Please run with sudo:"
-    echo "    sudo bash scripts/install.sh"
+    echo "    sudo ./install.sh"
     exit 1
 fi
 
@@ -251,3 +251,4 @@ echo "[✓] Umbra installation completed successfully."
 echo "    Start routing:  sudo umbra start"
 echo "    Check status:   sudo umbra status"
 echo "    Stop routing:   sudo umbra stop"
+echo "    Uninstall:      sudo umbra uninstall"
