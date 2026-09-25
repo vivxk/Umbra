@@ -272,7 +272,7 @@ pub fn find_uninstall_script() -> Result<std::path::PathBuf> {
     }
 
     Err(UmbraError::UninstallationFailed(
-        "installed uninstallation script not found in trusted system directories (/usr/share/umbra/scripts/uninstall.sh)".to_string(),
+        "installed uninstallation script not found in trusted system directories (/usr/share/umbra/scripts/uninstall.sh). Run 'sudo make uninstall' or 'sudo ./scripts/uninstall.sh' from the source directory, or re-run './install.sh'.".to_string(),
     ))
 }
 
