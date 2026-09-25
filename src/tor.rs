@@ -323,9 +323,29 @@ pub fn verify_socket_ownership(
     };
 
     // Reject root-owned Tor socket unconditionally (Section 15)
-    if socket.uid == 0 {
-        return Err(UmbraError::TorRunningAsRoot);
-    }
+    // Sockets created by systemd-managed Tor daemons before dropping privileges retain creator sk_uid=0 in /proc/net/tcp.
+    // If socket.uid is 0, verify whether the actual owning process in /proc/<pid>/fd has dropped privileges to an unprivileged UID.
+    let proc_uid = if socket.uid == 0 {
+        let owning_pid = expected_pid.or_else(|| {
+            find_socket_inode_owner(proc_dir, socket.inode)
+                .ok()
+                .flatten()
+                .map(|(p, _)| p)
+        });
+
+        if let Some(pid) = owning_pid {
+            let status_path = proc_dir.join(pid.to_string()).join("status");
+            let uid = TorController::extract_uid_from_status(&status_path).ok();
+            if uid == Some(0) || uid.is_none() {
+                return Err(UmbraError::TorRunningAsRoot);
+            }
+            uid
+        } else {
+            return Err(UmbraError::TorRunningAsRoot);
+        }
+    } else {
+        None
+    };
 
     // Check bind address: must be local-only 127.0.0.1
     if socket.local_ip != [127, 0, 0, 1] {
@@ -341,11 +361,16 @@ pub fn verify_socket_ownership(
 
     // Check UID if expected
     if let Some(exp_uid) = expected_uid {
-        if socket.uid != exp_uid {
+        let effective_uid = if socket.uid == 0 {
+            proc_uid.unwrap_or(0)
+        } else {
+            socket.uid
+        };
+        if effective_uid != exp_uid {
             return Err(UmbraError::TorListenerWrongProcess {
                 port,
                 expected: format!("Tor UID {exp_uid}"),
-                actual: format!("UID {}", socket.uid),
+                actual: format!("UID {effective_uid}"),
             });
         }
     }
