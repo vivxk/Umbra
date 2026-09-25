@@ -246,9 +246,16 @@ if [ -f "$SERVICE_SRC" ]; then
     fi
 fi
 
+# 5. Install uninstall script to $PREFIX/share/umbra/scripts/uninstall.sh
+SHARE_DIR="${DESTDIR}${PREFIX}/share/umbra"
+mkdir -p "$SHARE_DIR/scripts"
+install -m 0755 "$REPO_ROOT/scripts/uninstall.sh" "$SHARE_DIR/scripts/uninstall.sh"
+echo "[✓] Uninstaller installed: $SHARE_DIR/scripts/uninstall.sh"
+
 echo ""
 echo "[✓] Umbra installation completed successfully."
 echo "    Start routing:  sudo umbra start"
 echo "    Check status:   sudo umbra status"
 echo "    Stop routing:   sudo umbra stop"
-echo "    Uninstall:      sudo make uninstall"
+echo "    Uninstall:      sudo umbra uninstall (or sudo make uninstall)"
+

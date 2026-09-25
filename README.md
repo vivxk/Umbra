@@ -198,8 +198,10 @@ sudo umbra stop
 Then uninstall:
 
 ```bash
-sudo make uninstall
+sudo umbra uninstall
 ```
+
+*(Alternatively: `sudo make uninstall`)*
 
 Uninstallation refuses to proceed while Umbra is active or in an unresolved recovery state.
 

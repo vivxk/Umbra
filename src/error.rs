@@ -126,6 +126,9 @@ pub enum UmbraError {
     #[error("Root privileges required for operation '{0}'")]
     PrivilegeRequired(String),
 
+    #[error("Uninstallation failed: {0}")]
+    UninstallationFailed(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

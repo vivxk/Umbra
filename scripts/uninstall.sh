@@ -175,5 +175,21 @@ if [ -z "$DESTDIR" ] && [ -d "/run/umbra" ]; then
     clean_run_dir "/run/umbra"
 fi
 
+# 5. Clean up installed support files / uninstaller in share directory
+SHARE_DIR="${DESTDIR}${PREFIX}/share/umbra"
+if [ -f "$SHARE_DIR/scripts/uninstall.sh" ] || [ -L "$SHARE_DIR/scripts/uninstall.sh" ]; then
+    rm -f "$SHARE_DIR/scripts/uninstall.sh"
+    rmdir "$SHARE_DIR/scripts" 2>/dev/null || true
+    rmdir "$SHARE_DIR" 2>/dev/null || true
+    echo "[✓] Removed $SHARE_DIR"
+fi
+if [ -z "$DESTDIR" ] && [ -d "/usr/share/umbra" ]; then
+    rm -f "/usr/share/umbra/scripts/uninstall.sh" 2>/dev/null || true
+    rmdir "/usr/share/umbra/scripts" 2>/dev/null || true
+    rmdir "/usr/share/umbra" 2>/dev/null || true
+    echo "[✓] Removed /usr/share/umbra"
+fi
+
 echo ""
 echo "[✓] Umbra has been cleanly uninstalled from the system."
+

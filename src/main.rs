@@ -32,6 +32,7 @@ fn run_app(cli: Cli) -> Result<()> {
         Commands::Status => handle_status(),
         Commands::Recover { normal: _, force } => handle_recover(force),
         Commands::Newnym => handle_newnym(),
+        Commands::Uninstall => handle_uninstall(),
         Commands::Version => {
             println!("Umbra v0.1.0 - Minimal privacy-first, fail-closed Linux network boundary");
             println!("Target: Linux (nftables + Tor transparent proxying)");
@@ -197,4 +198,9 @@ fn handle_newnym() -> Result<()> {
     TorController::request_newnym(DEFAULT_TOR_CONTROLPORT)?;
     println!("[✓] Successfully signaled Tor for new identity circuit.");
     Ok(())
+}
+
+fn handle_uninstall() -> Result<()> {
+    require_root("uninstall")?;
+    umbra::system::execute_uninstall()
 }

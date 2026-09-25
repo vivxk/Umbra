@@ -176,3 +176,102 @@ pub fn is_wsl_environment() -> bool {
     }
     false
 }
+
+/// Standard trusted script search locations for uninstallation
+pub const TRUSTED_UNINSTALL_SCRIPT_PATHS: &[&str] = &[
+    "/usr/share/umbra/scripts/uninstall.sh",
+    "/usr/share/umbra/uninstall.sh",
+    "/usr/local/share/umbra/scripts/uninstall.sh",
+    "/etc/umbra/scripts/uninstall.sh",
+];
+
+/// Locates the existing uninstall script using project path conventions
+pub fn find_uninstall_script() -> Result<std::path::PathBuf> {
+    if let Ok(env_path) = std::env::var("UMBRA_UNINSTALL_SCRIPT") {
+        let p = std::path::PathBuf::from(env_path);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+
+    for &path in TRUSTED_UNINSTALL_SCRIPT_PATHS {
+        let p = Path::new(path);
+        if p.is_file() {
+            return Ok(p.to_path_buf());
+        }
+    }
+
+    let cwd_script = Path::new("scripts/uninstall.sh");
+    if cwd_script.is_file() {
+        return Ok(cwd_script.to_path_buf());
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let candidates = [
+                parent.join("scripts/uninstall.sh"),
+                parent.join("../scripts/uninstall.sh"),
+                parent.join("../../scripts/uninstall.sh"),
+                parent.join("../../../scripts/uninstall.sh"),
+                parent.join("../share/umbra/scripts/uninstall.sh"),
+            ];
+            for cand in candidates {
+                if cand.is_file() {
+                    return Ok(cand);
+                }
+            }
+        }
+    }
+
+    Err(UmbraError::UninstallationFailed(
+        "uninstall script not found (expected scripts/uninstall.sh or /usr/share/umbra/scripts/uninstall.sh)".to_string(),
+    ))
+}
+
+/// Executes uninstallation by delegating directly to the existing uninstall script
+pub fn execute_uninstall() -> Result<()> {
+    let script = find_uninstall_script()?;
+    execute_uninstall_script(&script)
+}
+
+/// Delegates uninstallation execution to a specified script path using trusted bash
+pub fn execute_uninstall_script(script_path: &Path) -> Result<()> {
+    if !script_path.is_file() {
+        return Err(UmbraError::UninstallationFailed(format!(
+            "uninstall script does not exist or is not a regular file: {}",
+            script_path.display()
+        )));
+    }
+
+    let canonical = fs::canonicalize(script_path).map_err(|e| {
+        UmbraError::UninstallationFailed(format!(
+            "failed to canonicalize uninstall script path {}: {e}",
+            script_path.display()
+        ))
+    })?;
+
+    let mut cmd = resolve_trusted_command("bash")?;
+    cmd.arg(&canonical);
+    cmd.stdin(std::process::Stdio::inherit());
+    cmd.stdout(std::process::Stdio::inherit());
+    cmd.stderr(std::process::Stdio::inherit());
+
+    let status = cmd.status().map_err(|e| {
+        UmbraError::UninstallationFailed(format!(
+            "failed to execute uninstallation script {}: {e}",
+            canonical.display()
+        ))
+    })?;
+
+    if !status.success() {
+        return Err(UmbraError::UninstallationFailed(format!(
+            "uninstall script failed with status {}",
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "terminated by signal".to_string())
+        )));
+    }
+
+    Ok(())
+}

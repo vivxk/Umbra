@@ -49,6 +49,9 @@ pub enum Commands {
     /// Request a new Tor identity circuit via ControlPort
     Newnym,
 
+    /// Uninstall Umbra
+    Uninstall,
+
     /// Display version and environment information
     Version,
 }

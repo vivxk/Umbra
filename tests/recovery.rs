@@ -18,6 +18,58 @@ fn test_cli_parse_stop() {
 }
 
 #[test]
+fn test_cli_parse_uninstall() {
+    let cli = Cli::try_parse_from(["umbra", "uninstall"]).expect("parse uninstall");
+    assert_eq!(cli.command, Commands::Uninstall);
+}
+
+#[test]
+fn test_uninstall_delegation_executes_script() {
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    // 1. Valid script delegates cleanly
+    let mut script_file = NamedTempFile::new().expect("create mock script");
+    writeln!(script_file, "#!/bin/sh\nexit 0").unwrap();
+    let script_path = script_file.path().to_path_buf();
+
+    let res = umbra::system::execute_uninstall_script(&script_path);
+    assert!(
+        res.is_ok(),
+        "execute_uninstall_script should succeed for valid script: {res:?}"
+    );
+
+    // 2. Failing script propagates exit code
+    let mut fail_file = NamedTempFile::new().expect("create failing mock script");
+    writeln!(fail_file, "#!/bin/sh\nexit 42").unwrap();
+    let fail_path = fail_file.path().to_path_buf();
+
+    let fail_res = umbra::system::execute_uninstall_script(&fail_path);
+    assert!(
+        fail_res.is_err(),
+        "execute_uninstall_script must fail on non-zero exit"
+    );
+    match fail_res.unwrap_err() {
+        UmbraError::UninstallationFailed(msg) => {
+            assert!(msg.contains("42") || msg.contains("status"));
+        }
+        other => panic!("expected UninstallationFailed, got {other:?}"),
+    }
+
+    // 3. Nonexistent script returns error
+    let missing_path = std::path::Path::new("/tmp/nonexistent_umbra_uninstall_script_12345.sh");
+    let missing_res = umbra::system::execute_uninstall_script(missing_path);
+    assert!(missing_res.is_err());
+
+    // 4. find_uninstall_script finds the repository script
+    let found = umbra::system::find_uninstall_script();
+    assert!(
+        found.is_ok(),
+        "find_uninstall_script should discover scripts/uninstall.sh: {found:?}"
+    );
+}
+
+#[test]
 fn test_cli_parse_recover_default() {
     let cli = Cli::try_parse_from(["umbra", "recover"]).expect("parse recover default");
     assert_eq!(
