@@ -177,58 +177,108 @@ pub fn is_wsl_environment() -> bool {
     false
 }
 
-/// Standard trusted script search locations for uninstallation
+/// Authorized system installation prefixes for the uninstaller script
+pub const TRUSTED_UNINSTALL_PREFIXES: &[&str] = &["/usr/share/umbra", "/usr/local/share/umbra"];
+
+/// Standard authorized script paths for uninstallation
 pub const TRUSTED_UNINSTALL_SCRIPT_PATHS: &[&str] = &[
     "/usr/share/umbra/scripts/uninstall.sh",
-    "/usr/share/umbra/uninstall.sh",
     "/usr/local/share/umbra/scripts/uninstall.sh",
-    "/etc/umbra/scripts/uninstall.sh",
+    "/usr/share/umbra/uninstall.sh",
+    "/usr/local/share/umbra/uninstall.sh",
 ];
 
-/// Locates the existing uninstall script using project path conventions
+/// Validates that an uninstaller script is a trusted, root-owned, non-group/world-writable,
+/// executable regular file residing strictly within an authorized system installation prefix.
+pub fn validate_trusted_uninstall_script(script_path: &Path) -> Result<std::path::PathBuf> {
+    if !script_path.exists() {
+        return Err(UmbraError::UninstallationFailed(format!(
+            "uninstall script does not exist: {}",
+            script_path.display()
+        )));
+    }
+
+    let canonical = fs::canonicalize(script_path).map_err(|e| {
+        UmbraError::UninstallationFailed(format!(
+            "failed to canonicalize uninstall script path {}: {e}",
+            script_path.display()
+        ))
+    })?;
+
+    // Must reside strictly within an authorized trusted prefix
+    let in_trusted = TRUSTED_UNINSTALL_PREFIXES
+        .iter()
+        .any(|prefix| canonical.starts_with(Path::new(prefix)));
+    if !in_trusted {
+        return Err(UmbraError::UninstallationFailed(format!(
+            "uninstall script {} does not reside in trusted system directories ({:?})",
+            canonical.display(),
+            TRUSTED_UNINSTALL_PREFIXES
+        )));
+    }
+
+    let meta = fs::metadata(&canonical).map_err(|e| {
+        UmbraError::UninstallationFailed(format!(
+            "failed to read metadata for uninstall script {}: {e}",
+            canonical.display()
+        ))
+    })?;
+
+    use std::os::unix::fs::MetadataExt;
+    if !meta.is_file() {
+        return Err(UmbraError::UninstallationFailed(format!(
+            "uninstall script {} is not a regular file",
+            canonical.display()
+        )));
+    }
+
+    // Must be owned by root (UID 0)
+    if meta.uid() != 0 {
+        return Err(UmbraError::UninstallationFailed(format!(
+            "uninstall script {} must be owned by root (UID 0), found UID {}",
+            canonical.display(),
+            meta.uid()
+        )));
+    }
+
+    let mode = meta.mode();
+    // Must NOT be group-writable or world-writable
+    if (mode & 0o022) != 0 {
+        return Err(UmbraError::UninstallationFailed(format!(
+            "uninstall script {} has insecure permissions (mode {:04o}): group- or world-writable",
+            canonical.display(),
+            mode & 0o7777
+        )));
+    }
+
+    // Must be executable
+    if (mode & 0o111) == 0 {
+        return Err(UmbraError::UninstallationFailed(format!(
+            "uninstall script {} is not executable (mode {:04o})",
+            canonical.display(),
+            mode & 0o7777
+        )));
+    }
+
+    Ok(canonical)
+}
+
+/// Locates and verifies the legitimate installed Umbra uninstaller.
+/// Strictly rejects arbitrary environment overrides and current working directory paths.
 pub fn find_uninstall_script() -> Result<std::path::PathBuf> {
-    if let Ok(env_path) = std::env::var("UMBRA_UNINSTALL_SCRIPT") {
-        let p = std::path::PathBuf::from(env_path);
-        if p.is_file() {
-            return Ok(p);
-        }
-    }
-
-    for &path in TRUSTED_UNINSTALL_SCRIPT_PATHS {
-        let p = Path::new(path);
-        if p.is_file() {
-            return Ok(p.to_path_buf());
-        }
-    }
-
-    let cwd_script = Path::new("scripts/uninstall.sh");
-    if cwd_script.is_file() {
-        return Ok(cwd_script.to_path_buf());
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let candidates = [
-                parent.join("scripts/uninstall.sh"),
-                parent.join("../scripts/uninstall.sh"),
-                parent.join("../../scripts/uninstall.sh"),
-                parent.join("../../../scripts/uninstall.sh"),
-                parent.join("../share/umbra/scripts/uninstall.sh"),
-            ];
-            for cand in candidates {
-                if cand.is_file() {
-                    return Ok(cand);
-                }
-            }
+    for &candidate in TRUSTED_UNINSTALL_SCRIPT_PATHS {
+        let path = Path::new(candidate);
+        if path.exists() {
+            return validate_trusted_uninstall_script(path);
         }
     }
 
     Err(UmbraError::UninstallationFailed(
-        "uninstall script not found (expected scripts/uninstall.sh or /usr/share/umbra/scripts/uninstall.sh)".to_string(),
+        "installed uninstallation script not found in trusted system directories (/usr/share/umbra/scripts/uninstall.sh)".to_string(),
     ))
 }
 
-/// Executes uninstallation by delegating directly to the existing uninstall script
+/// Executes uninstallation by delegating directly to the verified installed uninstall script
 pub fn execute_uninstall() -> Result<()> {
     let script = find_uninstall_script()?;
     execute_uninstall_script(&script)
@@ -249,6 +299,29 @@ pub fn execute_uninstall_script(script_path: &Path) -> Result<()> {
             script_path.display()
         ))
     })?;
+
+    let meta = fs::metadata(&canonical).map_err(|e| {
+        UmbraError::UninstallationFailed(format!(
+            "failed to read metadata for uninstall script {}: {e}",
+            canonical.display()
+        ))
+    })?;
+
+    use std::os::unix::fs::MetadataExt;
+    if !meta.is_file() {
+        return Err(UmbraError::UninstallationFailed(format!(
+            "uninstall script {} is not a regular file",
+            canonical.display()
+        )));
+    }
+
+    // Must not be world-writable
+    if (meta.mode() & 0o002) != 0 {
+        return Err(UmbraError::UninstallationFailed(format!(
+            "uninstall script {} is world-writable",
+            canonical.display()
+        )));
+    }
 
     let mut cmd = resolve_trusted_command("bash")?;
     cmd.arg(&canonical);

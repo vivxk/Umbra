@@ -60,13 +60,61 @@ fn test_uninstall_delegation_executes_script() {
     let missing_path = std::path::Path::new("/tmp/nonexistent_umbra_uninstall_script_12345.sh");
     let missing_res = umbra::system::execute_uninstall_script(missing_path);
     assert!(missing_res.is_err());
+}
 
-    // 4. find_uninstall_script finds the repository script
-    let found = umbra::system::find_uninstall_script();
+#[test]
+fn test_production_script_resolver_rejects_untrusted_paths() {
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    // 1. Resolver must reject environment variable override UMBRA_UNINSTALL_SCRIPT
+    let mut rogue_env_script = NamedTempFile::new().expect("create rogue env script");
+    writeln!(rogue_env_script, "#!/bin/sh\necho pwned\nexit 0").unwrap();
+    let rogue_env_path = rogue_env_script.path().to_string_lossy().to_string();
+
+    std::env::set_var("UMBRA_UNINSTALL_SCRIPT", &rogue_env_path);
+    let res = umbra::system::find_uninstall_script();
+    std::env::remove_var("UMBRA_UNINSTALL_SCRIPT");
+
+    match res {
+        Ok(path) => {
+            assert_ne!(
+                path.to_string_lossy(),
+                rogue_env_path,
+                "find_uninstall_script must NEVER select UMBRA_UNINSTALL_SCRIPT"
+            );
+            assert!(
+                umbra::system::TRUSTED_UNINSTALL_PREFIXES
+                    .iter()
+                    .any(|prefix| path.starts_with(std::path::Path::new(prefix))),
+                "Selected script must reside in a trusted prefix"
+            );
+        }
+        Err(UmbraError::UninstallationFailed(_)) => {
+            // Expected when Umbra is not installed in /usr/share/umbra
+        }
+        other => panic!("expected UninstallationFailed or trusted path, got {other:?}"),
+    }
+
+    // 2. Resolver must reject current-working-directory scripts/uninstall.sh
+    let cwd_relative = std::path::Path::new("scripts/uninstall.sh");
     assert!(
-        found.is_ok(),
-        "find_uninstall_script should discover scripts/uninstall.sh: {found:?}"
+        cwd_relative.exists(),
+        "scripts/uninstall.sh exists in repository"
     );
+
+    if let Ok(path) = umbra::system::find_uninstall_script() {
+        assert_ne!(
+            path, cwd_relative,
+            "find_uninstall_script must NEVER select current-working-directory script"
+        );
+        assert!(
+            umbra::system::TRUSTED_UNINSTALL_PREFIXES
+                .iter()
+                .any(|prefix| path.starts_with(std::path::Path::new(prefix))),
+            "Selected script must reside in a trusted prefix"
+        );
+    }
 }
 
 #[test]
