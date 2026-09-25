@@ -60,7 +60,7 @@ fi
 
 if [ -n "$UMBRA_BIN" ] && [ -z "$DESTDIR" ]; then
     STATUS_OUT="$("$UMBRA_BIN" status 2>&1 || true)"
-    if echo "$STATUS_OUT" | grep -q -E "ACTIVE|RECOVERY_REQUIRED|UNKNOWN"; then
+    if echo "$STATUS_OUT" | grep -q -E "^Umbra Status:[[:space:]]+(ACTIVE|RECOVERY_REQUIRED|UNKNOWN|STARTING)"; then
         echo "[!] CLI reports Umbra is not inactive:"
         echo "$STATUS_OUT" | sed 's/^/    /'
         IS_ACTIVE=1
