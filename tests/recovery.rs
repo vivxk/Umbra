@@ -86,7 +86,7 @@ fn test_production_script_resolver_rejects_untrusted_paths() {
             assert!(
                 umbra::system::TRUSTED_UNINSTALL_PREFIXES
                     .iter()
-                    .any(|prefix| path.starts_with(std::path::Path::new(prefix))),
+                    .any(|prefix| path.strip_prefix(std::path::Path::new(prefix)).is_ok()),
                 "Selected script must reside in a trusted prefix"
             );
         }
@@ -111,10 +111,28 @@ fn test_production_script_resolver_rejects_untrusted_paths() {
         assert!(
             umbra::system::TRUSTED_UNINSTALL_PREFIXES
                 .iter()
-                .any(|prefix| path.starts_with(std::path::Path::new(prefix))),
+                .any(|prefix| path.strip_prefix(std::path::Path::new(prefix)).is_ok()),
             "Selected script must reside in a trusted prefix"
         );
     }
+}
+
+#[test]
+fn test_validate_trusted_uninstall_script_rejects_similar_prefix_names() {
+    let evil_path = std::path::Path::new("/usr/share/umbra-evil/scripts/uninstall.sh");
+    let is_inside_trusted = umbra::system::TRUSTED_UNINSTALL_PREFIXES
+        .iter()
+        .any(|prefix| evil_path.strip_prefix(std::path::Path::new(prefix)).is_ok());
+    assert!(
+        !is_inside_trusted,
+        "similar prefix names like /usr/share/umbra-evil must not match /usr/share/umbra"
+    );
+
+    let res = umbra::system::validate_trusted_uninstall_script(evil_path);
+    assert!(
+        res.is_err(),
+        "must reject paths outside authorized prefix components"
+    );
 }
 
 #[test]

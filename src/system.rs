@@ -108,10 +108,10 @@ pub fn resolve_trusted_command(binary: &str) -> Result<std::process::Command> {
                 ))
             })?;
 
-            // Must reside within a trusted prefix
+            // Must reside within a trusted prefix using component-aware validation
             let in_trusted = TRUSTED_BIN_DIRS
                 .iter()
-                .any(|prefix| canonical.starts_with(Path::new(prefix)));
+                .any(|prefix| canonical.strip_prefix(Path::new(prefix)).is_ok());
             if !in_trusted {
                 continue;
             }
@@ -184,8 +184,6 @@ pub const TRUSTED_UNINSTALL_PREFIXES: &[&str] = &["/usr/share/umbra", "/usr/loca
 pub const TRUSTED_UNINSTALL_SCRIPT_PATHS: &[&str] = &[
     "/usr/share/umbra/scripts/uninstall.sh",
     "/usr/local/share/umbra/scripts/uninstall.sh",
-    "/usr/share/umbra/uninstall.sh",
-    "/usr/local/share/umbra/uninstall.sh",
 ];
 
 /// Validates that an uninstaller script is a trusted, root-owned, non-group/world-writable,
@@ -205,10 +203,10 @@ pub fn validate_trusted_uninstall_script(script_path: &Path) -> Result<std::path
         ))
     })?;
 
-    // Must reside strictly within an authorized trusted prefix
+    // Must reside strictly within an authorized trusted prefix using component-aware validation
     let in_trusted = TRUSTED_UNINSTALL_PREFIXES
         .iter()
-        .any(|prefix| canonical.starts_with(Path::new(prefix)));
+        .any(|prefix| canonical.strip_prefix(Path::new(prefix)).is_ok());
     if !in_trusted {
         return Err(UmbraError::UninstallationFailed(format!(
             "uninstall script {} does not reside in trusted system directories ({:?})",
