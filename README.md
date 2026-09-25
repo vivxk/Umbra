@@ -211,24 +211,6 @@ Uninstallation refuses to proceed while Umbra is active or in an unresolved reco
 
 ---
 
-## Development
-
-The project includes automated regression tests.
-
-Run tests:
-
-```bash
-cargo test
-```
-
-Run formatting and lint checks:
-
-```bash
-make lint
-```
-
----
-
 ## License
 
 Dual-licensed under either of:
