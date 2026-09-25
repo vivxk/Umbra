@@ -5,7 +5,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +19,6 @@ pub enum UmbraStatus {
     Inactive,
     Starting,
     Active,
-    Stopping,
     RecoveryRequired,
     Unknown,
 }
@@ -31,15 +29,10 @@ impl fmt::Display for UmbraStatus {
             Self::Inactive => write!(f, "INACTIVE"),
             Self::Starting => write!(f, "STARTING"),
             Self::Active => write!(f, "ACTIVE"),
-            Self::Stopping => write!(f, "STOPPING"),
             Self::RecoveryRequired => write!(f, "RECOVERY_REQUIRED"),
             Self::Unknown => write!(f, "UNKNOWN"),
         }
     }
-}
-
-fn default_status() -> UmbraStatus {
-    UmbraStatus::Active
 }
 
 /// Minimal volatile state stored in /run/umbra/active.json
@@ -47,7 +40,6 @@ fn default_status() -> UmbraStatus {
 pub struct ActiveState {
     pub version: u32,
     pub activation_id: String,
-    #[serde(default = "default_status")]
     pub status: UmbraStatus,
     pub interface: String,
     pub original_mac: String,
@@ -56,8 +48,6 @@ pub struct ActiveState {
     pub tor_uid: u32,
     pub tor_transport_port: u16,
     pub tor_dns_port: u16,
-    pub firewall_identity: String,
-    pub created_at_epoch: u64,
 }
 
 impl ActiveState {
@@ -71,7 +61,6 @@ impl ActiveState {
         tor_uid: u32,
         tor_transport_port: u16,
         tor_dns_port: u16,
-        firewall_identity: String,
     ) -> Self {
         Self::new_with_status(
             activation_id,
@@ -82,7 +71,6 @@ impl ActiveState {
             tor_uid,
             tor_transport_port,
             tor_dns_port,
-            firewall_identity,
             UmbraStatus::Active,
         )
     }
@@ -97,14 +85,8 @@ impl ActiveState {
         tor_uid: u32,
         tor_transport_port: u16,
         tor_dns_port: u16,
-        firewall_identity: String,
         status: UmbraStatus,
     ) -> Self {
-        let created_at_epoch = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
         Self {
             version: 1,
             activation_id,
@@ -116,8 +98,6 @@ impl ActiveState {
             tor_uid,
             tor_transport_port,
             tor_dns_port,
-            firewall_identity,
-            created_at_epoch,
         }
     }
 
@@ -130,10 +110,7 @@ impl ActiveState {
             )));
         }
         match self.status {
-            UmbraStatus::Starting
-            | UmbraStatus::Active
-            | UmbraStatus::Stopping
-            | UmbraStatus::RecoveryRequired => {}
+            UmbraStatus::Starting | UmbraStatus::Active | UmbraStatus::RecoveryRequired => {}
             _ => {
                 return Err(UmbraError::RuntimeStateCorrupt(format!(
                     "invalid lifecycle status in active state: {}",
@@ -176,11 +153,6 @@ impl ActiveState {
         if self.tor_transport_port == 0 || self.tor_dns_port == 0 {
             return Err(UmbraError::RuntimeStateCorrupt(
                 "invalid zero port in state".to_string(),
-            ));
-        }
-        if self.firewall_identity.trim().is_empty() {
-            return Err(UmbraError::RuntimeStateCorrupt(
-                "empty firewall_identity".to_string(),
             ));
         }
         Ok(())

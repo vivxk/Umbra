@@ -198,13 +198,7 @@ sudo umbra stop
 Then uninstall:
 
 ```bash
-sudo umbra uninstall
-```
-
-Use `--yes` to skip the interactive confirmation prompt:
-
-```bash
-sudo umbra uninstall --yes
+sudo make uninstall
 ```
 
 Uninstallation refuses to proceed while Umbra is active or in an unresolved recovery state.

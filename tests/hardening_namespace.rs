@@ -7,23 +7,20 @@ use tempfile::NamedTempFile;
 
 use common::{is_in_isolated_netns, IsolatedNetns};
 use umbra::constants::{
-    DEFAULT_TOR_CONTROLPORT, DEFAULT_TOR_DNSPORT, DEFAULT_TOR_TRANSPORT, NFT_TABLE_FAMILY,
-    NFT_TABLE_NAME,
+    DEFAULT_TOR_DNSPORT, DEFAULT_TOR_TRANSPORT, NFT_TABLE_FAMILY, NFT_TABLE_NAME,
 };
 use umbra::error::UmbraError;
 use umbra::firewall::{FirewallConfig, FirewallController};
 use umbra::interface::InterfaceController;
 use umbra::runtime_state::{ActiveState, UmbraStatus};
 
-fn get_test_fw_config(iface: &str, activation_id: &str) -> FirewallConfig {
+fn get_test_fw_config(_iface: &str, activation_id: &str) -> FirewallConfig {
     FirewallConfig {
         table_name: NFT_TABLE_NAME.to_string(),
         table_family: NFT_TABLE_FAMILY.to_string(),
         tor_uid: 1000,
         tor_transport_port: DEFAULT_TOR_TRANSPORT,
         tor_dns_port: DEFAULT_TOR_DNSPORT,
-        tor_control_port: DEFAULT_TOR_CONTROLPORT,
-        egress_interface: iface.to_string(),
         activation_id: activation_id.to_string(),
     }
 }
@@ -317,7 +314,6 @@ fn test_mac_mismatch_prevents_active_status_in_netns() {
         fw_config.tor_uid,
         fw_config.tor_transport_port,
         fw_config.tor_dns_port,
-        fw_config.table_name.clone(),
         UmbraStatus::Active,
     );
     state.save_to_path(&state_path).expect("save state");

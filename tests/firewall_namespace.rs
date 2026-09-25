@@ -2,8 +2,7 @@ mod common;
 
 use std::process::{Command, Stdio};
 use umbra::constants::{
-    DEFAULT_TOR_CONTROLPORT, DEFAULT_TOR_DNSPORT, DEFAULT_TOR_TRANSPORT, NFT_TABLE_FAMILY,
-    NFT_TABLE_NAME, OWNERSHIP_MARKER,
+    DEFAULT_TOR_DNSPORT, DEFAULT_TOR_TRANSPORT, NFT_TABLE_FAMILY, NFT_TABLE_NAME, OWNERSHIP_MARKER,
 };
 use umbra::error::UmbraError;
 use umbra::firewall::{FirewallConfig, FirewallController};
@@ -15,8 +14,6 @@ fn get_test_config() -> FirewallConfig {
         tor_uid: 122,
         tor_transport_port: DEFAULT_TOR_TRANSPORT,
         tor_dns_port: DEFAULT_TOR_DNSPORT,
-        tor_control_port: DEFAULT_TOR_CONTROLPORT,
-        egress_interface: "lo".to_string(),
         activation_id: "test_netns_act".to_string(),
     }
 }
@@ -328,8 +325,6 @@ fn test_firewall_traffic_redirection_and_blocking_in_netns() {
         tor_uid: 9999,
         tor_transport_port: 19040,
         tor_dns_port: 15353,
-        tor_control_port: 19051,
-        egress_interface: dummy_iface.to_string(),
         activation_id: "test_traffic_act".to_string(),
     };
 

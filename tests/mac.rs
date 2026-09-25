@@ -5,7 +5,7 @@ use umbra::mac::MacAddress;
 fn test_mac_unicast_and_locally_administered() {
     for _ in 0..100 {
         let mac = MacAddress::generate_random().expect("should generate random MAC");
-        let bytes = mac.bytes();
+        let bytes = mac.0;
 
         // Must be unicast (bit 0 == 0)
         assert_eq!(bytes[0] & 0x01, 0, "MAC {mac} must be unicast");
@@ -26,14 +26,14 @@ fn test_mac_unicast_and_locally_administered() {
 #[test]
 fn test_mac_parsing_colon_format() {
     let mac = MacAddress::parse("02:42:ac:11:00:02").expect("valid MAC format");
-    assert_eq!(mac.bytes(), [0x02, 0x42, 0xac, 0x11, 0x00, 0x02]);
+    assert_eq!(mac.0, [0x02, 0x42, 0xac, 0x11, 0x00, 0x02]);
     assert_eq!(mac.to_string(), "02:42:ac:11:00:02");
 }
 
 #[test]
 fn test_mac_parsing_hyphen_format() {
     let mac = MacAddress::parse("02-42-ac-11-00-02").expect("valid MAC format");
-    assert_eq!(mac.bytes(), [0x02, 0x42, 0xac, 0x11, 0x00, 0x02]);
+    assert_eq!(mac.0, [0x02, 0x42, 0xac, 0x11, 0x00, 0x02]);
 }
 
 #[test]

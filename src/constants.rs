@@ -33,9 +33,6 @@ pub const LOCK_FILE: &str = "/run/umbra/umbra.lock";
 /// Primary known unprivileged Tor accounts on Linux distributions
 pub const KNOWN_TOR_USERS: &[&str] = &["debian-tor", "tor", "_tor"];
 
-/// Default path for Umbra-managed Tor configuration fragment
-pub const DEFAULT_TOR_CONFIG_FRAGMENT: &str = "/etc/tor/torrc.d/umbra.conf";
-
 /// Trusted filesystem prefixes for Tor binary execution
 pub const TRUSTED_TOR_PREFIXES: &[&str] = &["/usr/bin", "/usr/sbin", "/bin", "/sbin"];
 

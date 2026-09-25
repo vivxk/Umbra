@@ -167,8 +167,6 @@ fn test_interface_restoration_failure_during_rollback_keeps_recovery_state_in_ne
         tor_uid: 1000,
         tor_transport_port: 9040,
         tor_dns_port: 5353,
-        tor_control_port: 9051,
-        egress_interface: dev_name.to_string(),
         activation_id: "act_rb_test".to_string(),
     };
 
@@ -188,7 +186,6 @@ fn test_interface_restoration_failure_during_rollback_keeps_recovery_state_in_ne
         fw_config.tor_uid,
         fw_config.tor_transport_port,
         fw_config.tor_dns_port,
-        fw_config.table_name.clone(),
         UmbraStatus::Starting,
     );
     active_state.save_to_path(&state_path).expect("save state");

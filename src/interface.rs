@@ -58,19 +58,6 @@ impl InterfaceController {
         candidates
     }
 
-    /// Extracts unique interface names ordered by metric ascending (lowest metric first).
-    pub fn parse_default_route_interfaces(route_content: &str) -> Vec<String> {
-        let mut candidates = Self::parse_default_routes(route_content);
-        candidates.sort_by_key(|c| c.metric);
-        let mut ifaces: Vec<String> = Vec::new();
-        for c in candidates {
-            if !ifaces.contains(&c.interface) {
-                ifaces.push(c.interface);
-            }
-        }
-        ifaces
-    }
-
     /// Parses stdout from `ip route show default` into route candidates
     pub fn parse_ip_route_default_output(stdout: &str) -> Vec<RouteCandidate> {
         let mut candidates = Vec::new();

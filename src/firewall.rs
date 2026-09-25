@@ -4,8 +4,7 @@ use std::io::Write;
 use std::process::Stdio;
 
 use crate::constants::{
-    DEFAULT_TOR_CONTROLPORT, DEFAULT_TOR_DNSPORT, DEFAULT_TOR_TRANSPORT, NFT_TABLE_FAMILY,
-    NFT_TABLE_NAME, OWNERSHIP_MARKER,
+    DEFAULT_TOR_DNSPORT, DEFAULT_TOR_TRANSPORT, NFT_TABLE_FAMILY, NFT_TABLE_NAME, OWNERSHIP_MARKER,
 };
 use crate::error::{Result, UmbraError};
 
@@ -17,8 +16,6 @@ pub struct FirewallConfig {
     pub tor_uid: u32,
     pub tor_transport_port: u16,
     pub tor_dns_port: u16,
-    pub tor_control_port: u16,
-    pub egress_interface: String,
     pub activation_id: String,
 }
 
@@ -30,8 +27,6 @@ impl Default for FirewallConfig {
             tor_uid: 0,
             tor_transport_port: DEFAULT_TOR_TRANSPORT,
             tor_dns_port: DEFAULT_TOR_DNSPORT,
-            tor_control_port: DEFAULT_TOR_CONTROLPORT,
-            egress_interface: String::new(),
             activation_id: String::new(),
         }
     }
@@ -84,7 +79,6 @@ impl FirewallController {
         ip6 daddr != ::1 drop comment "{marker}"
         ip daddr 127.0.0.1 tcp dport {tor_transport_port} accept comment "{marker}"
         ip daddr 127.0.0.1 udp dport {tor_dns_port} accept comment "{marker}"
-        ip daddr 127.0.0.1 tcp dport {tor_control_port} accept comment "{marker}"
         oif "lo" accept comment "{marker}"
         meta l4proto udp drop comment "{marker}"
     }}
@@ -95,85 +89,14 @@ impl FirewallController {
             tor_uid = config.tor_uid,
             tor_dns_port = config.tor_dns_port,
             tor_transport_port = config.tor_transport_port,
-            tor_control_port = config.tor_control_port,
             marker = marker
         )
-    }
-
-    /// Verifies the syntax of the generated ruleset without applying it (nft -c -f -).
-    /// Normalizes CRLF line terminators to LF to avoid nft syntax errors.
-    pub fn check_syntax(ruleset: &str) -> Result<()> {
-        let normalized = ruleset.replace("\r\n", "\n");
-        let run_check =
-            |use_unshare: bool| -> std::result::Result<std::process::Output, std::io::Error> {
-                let mut cmd = if use_unshare {
-                    let mut c = crate::system::resolve_trusted_command("unshare")
-                        .map_err(|e| std::io::Error::other(e.to_string()))?;
-                    c.args(["-r", "-n", "nft", "-c", "-f", "-"]);
-                    c
-                } else {
-                    let mut c = crate::system::resolve_trusted_command("nft")
-                        .map_err(|e| std::io::Error::other(e.to_string()))?;
-                    c.args(["-c", "-f", "-"]);
-                    c
-                };
-
-                let mut child = cmd
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()?;
-
-                if let Some(mut stdin) = child.stdin.take() {
-                    stdin.write_all(normalized.as_bytes())?;
-                }
-
-                child.wait_with_output()
-            };
-
-        // First attempt standard nft -c -f -
-        let output = match run_check(false) {
-            Ok(out) => {
-                if !out.status.success() {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    if stderr.contains("Operation not permitted") {
-                        // Retry inside unprivileged user namespace if unshare is available
-                        run_check(true).map_err(|e| {
-                            UmbraError::FirewallInstallFailed(format!(
-                                "failed to spawn unshare nft: {e}"
-                            ))
-                        })?
-                    } else {
-                        out
-                    }
-                } else {
-                    out
-                }
-            }
-            Err(e) => {
-                return Err(UmbraError::FirewallInstallFailed(format!(
-                    "failed to spawn nft -c: {e}"
-                )));
-            }
-        };
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(UmbraError::FirewallInstallFailed(format!(
-                "nft syntax check failed: {stderr}"
-            )));
-        }
-
-        Ok(())
     }
 
     /// Atomically applies the ruleset to the kernel via nft -f -
     pub fn install(config: &FirewallConfig) -> Result<()> {
         let ruleset = Self::generate_ruleset(config);
         let normalized = ruleset.replace("\r\n", "\n");
-
-        // Pre-validate syntax before kernel application
-        Self::check_syntax(&normalized)?;
 
         let mut child = crate::system::resolve_trusted_command("nft")?
             .args(["-f", "-"])

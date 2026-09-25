@@ -6,7 +6,6 @@ fn test_status_display() {
     assert_eq!(UmbraStatus::Active.to_string(), "ACTIVE");
     assert_eq!(UmbraStatus::Inactive.to_string(), "INACTIVE");
     assert_eq!(UmbraStatus::Starting.to_string(), "STARTING");
-    assert_eq!(UmbraStatus::Stopping.to_string(), "STOPPING");
     assert_eq!(
         UmbraStatus::RecoveryRequired.to_string(),
         "RECOVERY_REQUIRED"
@@ -25,7 +24,6 @@ fn test_state_validation_valid() {
         122,
         9040,
         5353,
-        "umbra".to_string(),
     );
 
     assert!(state.validate().is_ok());
@@ -42,7 +40,6 @@ fn test_state_validation_empty_fields_fail() {
         122,
         9040,
         5353,
-        "umbra".to_string(),
     );
 
     state.activation_id = "".to_string();
@@ -69,7 +66,6 @@ fn test_state_save_and_load_roundtrip() {
         1000,
         9040,
         5353,
-        "umbra".to_string(),
     );
 
     state.save_to_path(tmp.path()).expect("save must succeed");
@@ -79,4 +75,26 @@ fn test_state_save_and_load_roundtrip() {
         .expect("state must be present");
 
     assert_eq!(loaded, state);
+}
+
+#[test]
+fn test_state_deserialization_requires_status() {
+    let json_missing_status = r#"{
+        "version": 1,
+        "activation_id": "act_123",
+        "interface": "eth0",
+        "original_mac": "00:15:5d:d8:1e:d5",
+        "randomized_mac": "02:15:5d:d8:1e:d5",
+        "interface_was_up": true,
+        "tor_uid": 122,
+        "tor_transport_port": 9040,
+        "tor_dns_port": 5353
+    }"#;
+
+    let res: std::result::Result<ActiveState, serde_json::Error> =
+        serde_json::from_str(json_missing_status);
+    assert!(
+        res.is_err(),
+        "Missing status must fail deserialization rather than defaulting to Active"
+    );
 }

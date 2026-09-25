@@ -71,7 +71,6 @@ fn test_startup_rejects_already_active_session() {
         122,
         9040,
         5353,
-        "umbra".to_string(),
     );
     active_state
         .save_to_path(tmp.path())

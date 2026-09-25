@@ -12,7 +12,7 @@ use crate::firewall::{FirewallConfig, FirewallController};
 use crate::interface::{InterfaceBaseline, InterfaceController};
 use crate::mac::MacAddress;
 use crate::runtime_state::{ActiveState, UmbraStatus};
-use crate::tor::{TorController, TorIdentity};
+use crate::tor::TorController;
 use crate::verify::LiveVerifier;
 
 /// Configuration options for the startup transaction
@@ -55,11 +55,9 @@ impl StartupTransactionOptions {
 /// Result returned upon successful execution of the startup transaction
 #[derive(Debug, Clone)]
 pub struct StartupTransactionResult {
-    pub activation_id: String,
     pub interface: String,
     pub original_mac: MacAddress,
     pub randomized_mac: MacAddress,
-    pub tor_identity: TorIdentity,
     pub transport_port: u16,
     pub dns_port: u16,
 }
@@ -127,9 +125,7 @@ impl StartupTransaction {
             tor_uid,
             tor_transport_port: options.transport_port,
             tor_dns_port: options.dns_port,
-            egress_interface: iface.clone(),
             activation_id: activation_id.clone(),
-            ..Default::default()
         };
 
         // 6. Generate or Preserve MAC
@@ -143,7 +139,7 @@ impl StartupTransaction {
 
         // 7. Persist STARTING / recoverable runtime state BEFORE any host mutation (Section 4)
         let mut active_state = ActiveState::new_with_status(
-            activation_id.clone(),
+            activation_id,
             iface.clone(),
             baseline.original_mac.to_string(),
             random_mac.to_string(),
@@ -151,7 +147,6 @@ impl StartupTransaction {
             tor_uid,
             options.transport_port,
             options.dns_port,
-            fw_config.table_name.clone(),
             UmbraStatus::Starting,
         );
         active_state.save_to_path(state_path)?;
@@ -186,11 +181,9 @@ impl StartupTransaction {
             active_state.save_to_path(state_path)?;
 
             Ok(StartupTransactionResult {
-                activation_id,
                 interface: iface.clone(),
                 original_mac: baseline.original_mac,
                 randomized_mac: random_mac,
-                tor_identity: tor_ident,
                 transport_port: options.transport_port,
                 dns_port: options.dns_port,
             })

@@ -15,10 +15,6 @@ impl MacAddress {
         Self(bytes)
     }
 
-    pub fn bytes(&self) -> [u8; 6] {
-        self.0
-    }
-
     /// Checks if the MAC address is unicast (multicast bit, LSB of octet 0, is 0)
     pub fn is_unicast(&self) -> bool {
         (self.0[0] & 0x01) == 0

@@ -7,8 +7,7 @@ use tempfile::NamedTempFile;
 
 use common::{is_in_isolated_netns, IsolatedNetns};
 use umbra::constants::{
-    DEFAULT_TOR_CONTROLPORT, DEFAULT_TOR_DNSPORT, DEFAULT_TOR_TRANSPORT, NFT_TABLE_FAMILY,
-    NFT_TABLE_NAME,
+    DEFAULT_TOR_DNSPORT, DEFAULT_TOR_TRANSPORT, NFT_TABLE_FAMILY, NFT_TABLE_NAME,
 };
 use umbra::error::UmbraError;
 use umbra::firewall::{FirewallConfig, FirewallController};
@@ -17,15 +16,13 @@ use umbra::mac::MacAddress;
 use umbra::recovery::{RecoveryController, RecoveryOptions};
 use umbra::runtime_state::ActiveState;
 
-fn get_test_fw_config(iface: &str) -> FirewallConfig {
+fn get_test_fw_config(_iface: &str) -> FirewallConfig {
     FirewallConfig {
         table_name: NFT_TABLE_NAME.to_string(),
         table_family: NFT_TABLE_FAMILY.to_string(),
         tor_uid: 1000,
         tor_transport_port: DEFAULT_TOR_TRANSPORT,
         tor_dns_port: DEFAULT_TOR_DNSPORT,
-        tor_control_port: DEFAULT_TOR_CONTROLPORT,
-        egress_interface: iface.to_string(),
         activation_id: "test_rec_act".to_string(),
     }
 }
@@ -87,7 +84,6 @@ fn test_stop_workflow_clean_in_netns() {
         fw_config.tor_uid,
         fw_config.tor_transport_port,
         fw_config.tor_dns_port,
-        fw_config.table_name.clone(),
     );
     state.save_to_path(&state_path).expect("save state");
     assert!(state_path.exists());
@@ -210,7 +206,6 @@ fn test_recover_normal_workflow_in_netns() {
         fw_config.tor_uid,
         fw_config.tor_transport_port,
         fw_config.tor_dns_port,
-        fw_config.table_name.clone(),
     );
     state.save_to_path(&state_path).expect("save state");
 
@@ -427,7 +422,6 @@ table inet umbra {
         1000,
         9040,
         5353,
-        "umbra".to_string(),
     );
     state.save_to_path(&dummy_state).expect("save state");
 
@@ -604,7 +598,6 @@ fn test_recover_normal_fails_and_preserves_state_on_mac_restore_error_in_netns()
         fw_config.tor_uid,
         fw_config.tor_transport_port,
         fw_config.tor_dns_port,
-        fw_config.table_name.clone(),
     );
     state.save_to_path(&state_path).expect("save state");
 
@@ -818,7 +811,6 @@ fn test_stop_fails_and_keeps_firewall_on_mac_restore_error_in_netns() {
         fw_config.tor_uid,
         fw_config.tor_transport_port,
         fw_config.tor_dns_port,
-        fw_config.table_name.clone(),
     );
     state.save_to_path(&state_path).expect("save state");
 
@@ -886,7 +878,6 @@ fn test_recover_force_fails_and_preserves_state_on_mac_restore_error_in_netns() 
         fw_config.tor_uid,
         fw_config.tor_transport_port,
         fw_config.tor_dns_port,
-        fw_config.table_name.clone(),
     );
     state.save_to_path(&state_path).expect("save state");
 

@@ -4,7 +4,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use crate::constants::{KNOWN_TOR_COOKIE_PATHS, KNOWN_TOR_USERS, LOCAL_LOOPBACK_IPV4};
@@ -16,163 +16,6 @@ pub struct TorIdentity {
     pub pid: u32,
     pub uid: u32,
     pub exe_path: String,
-}
-
-/// Configuration parameters for Tor listeners and authentication
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TorConfig {
-    pub transport_port: u16,
-    pub dns_port: u16,
-    pub control_port: u16,
-    pub cookie_auth: bool,
-}
-
-impl Default for TorConfig {
-    fn default() -> Self {
-        Self {
-            transport_port: crate::constants::DEFAULT_TOR_TRANSPORT,
-            dns_port: crate::constants::DEFAULT_TOR_DNSPORT,
-            control_port: crate::constants::DEFAULT_TOR_CONTROLPORT,
-            cookie_auth: true,
-        }
-    }
-}
-
-impl TorConfig {
-    /// Renders an install-time Tor configuration fragment tagged with `# umbra-managed`
-    pub fn render_fragment(&self) -> String {
-        let cookie_flag = if self.cookie_auth { 1 } else { 0 };
-        format!(
-            "# umbra-managed: Umbra Tor Configuration Fragment\n\
-             # Generated automatically by Umbra privacy boundary. Do not edit directly.\n\
-             TransPort 127.0.0.1:{}\n\
-             DNSPort 127.0.0.1:{}\n\
-             ControlPort 127.0.0.1:{}\n\
-             CookieAuthentication {}\n",
-            self.transport_port, self.dns_port, self.control_port, cookie_flag,
-        )
-    }
-
-    /// Detects candidate path for Tor configuration fragment on this host
-    pub fn detect_fragment_path() -> PathBuf {
-        let torrc_d = Path::new("/etc/tor/torrc.d");
-        if torrc_d.is_dir() {
-            torrc_d.join("umbra.conf")
-        } else {
-            PathBuf::from(crate::constants::DEFAULT_TOR_CONFIG_FRAGMENT)
-        }
-    }
-
-    /// Verifies that a file is managed by Umbra and NOT the main torrc
-    pub fn verify_fragment_ownership(path: &Path) -> Result<()> {
-        let file_name = path
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or_default();
-
-        if file_name == "torrc" {
-            return Err(UmbraError::TorConfigOwnershipMismatch(
-                "refusing to treat main 'torrc' as an Umbra fragment; main torrc must never be overwritten".to_string(),
-            ));
-        }
-
-        if path.exists() {
-            // Verify resolved canonical target is not main torrc
-            if let Ok(canonical) = fs::canonicalize(path) {
-                if canonical
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .map(|f| f == "torrc")
-                    .unwrap_or(false)
-                {
-                    return Err(UmbraError::TorConfigOwnershipMismatch(
-                        "refusing to treat symlink pointing to main 'torrc' as an Umbra fragment"
-                            .to_string(),
-                    ));
-                }
-            }
-
-            let content = fs::read_to_string(path).map_err(|e| {
-                UmbraError::TorConfigOwnershipMismatch(format!(
-                    "cannot read fragment at {}: {e}",
-                    path.display()
-                ))
-            })?;
-
-            if !content.contains("# umbra-managed") {
-                return Err(UmbraError::TorConfigOwnershipMismatch(format!(
-                    "file at {} exists but is missing '# umbra-managed' ownership tag",
-                    path.display()
-                )));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Installs or updates an Umbra configuration fragment atomically
-    pub fn install_fragment(path: &Path, config: &TorConfig) -> Result<()> {
-        Self::verify_fragment_ownership(path)?;
-
-        if path.is_symlink() {
-            return Err(UmbraError::TorConfigOwnershipMismatch(format!(
-                "refusing to overwrite symlink at {}; configuration fragment must be a regular file",
-                path.display()
-            )));
-        }
-
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent)?;
-            }
-        }
-
-        let content = config.render_fragment();
-        fs::write(path, content)?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o644));
-        }
-
-        Ok(())
-    }
-
-    /// Removes an Umbra configuration fragment after verifying ownership
-    pub fn remove_fragment(path: &Path) -> Result<()> {
-        let file_name = path
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or_default();
-
-        if file_name == "torrc" {
-            return Err(UmbraError::TorConfigOwnershipMismatch(
-                "refusing to remove main 'torrc'".to_string(),
-            ));
-        }
-
-        if !path.exists() && !path.is_symlink() {
-            return Ok(());
-        }
-
-        if let Ok(canonical) = fs::canonicalize(path) {
-            if canonical
-                .file_name()
-                .and_then(|f| f.to_str())
-                .map(|f| f == "torrc")
-                .unwrap_or(false)
-            {
-                return Err(UmbraError::TorConfigOwnershipMismatch(
-                    "refusing to remove symlink pointing to main 'torrc'".to_string(),
-                ));
-            }
-        }
-
-        Self::verify_fragment_ownership(path)?;
-        fs::remove_file(path)?;
-        Ok(())
-    }
 }
 
 /// Parsed socket table entry from `/proc/net/tcp` or `/proc/net/udp`
@@ -1356,17 +1199,5 @@ impl TorController {
         let _ = reader.get_mut().write_all(b"QUIT\r\n");
 
         Ok(())
-    }
-
-    pub fn verify_config_fragment_ownership(path: &Path) -> Result<()> {
-        TorConfig::verify_fragment_ownership(path)
-    }
-
-    pub fn install_config_fragment(path: &Path, config: &TorConfig) -> Result<()> {
-        TorConfig::install_fragment(path, config)
-    }
-
-    pub fn remove_config_fragment(path: &Path) -> Result<()> {
-        TorConfig::remove_fragment(path)
     }
 }

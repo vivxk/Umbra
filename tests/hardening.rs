@@ -90,8 +90,6 @@ fn test_missing_dns_redirect_fails_firewall_verification() {
         tor_uid: 1000,
         tor_transport_port: 9040,
         tor_dns_port: 5353,
-        tor_control_port: 9051,
-        egress_interface: "dummy0".to_string(),
         activation_id: "act_test_dns".to_string(),
     };
 
@@ -120,8 +118,6 @@ fn test_missing_transport_redirect_fails_firewall_verification() {
         tor_uid: 1000,
         tor_transport_port: 9040,
         tor_dns_port: 5353,
-        tor_control_port: 9051,
-        egress_interface: "dummy0".to_string(),
         activation_id: "act_test_trans".to_string(),
     };
 
@@ -146,8 +142,6 @@ fn test_activation_id_mismatch_authenticates_fail() {
         tor_uid: 1000,
         tor_transport_port: 9040,
         tor_dns_port: 5353,
-        tor_control_port: 9051,
-        egress_interface: "dummy0".to_string(),
         activation_id: "act_correct_123".to_string(),
     };
 
@@ -175,7 +169,6 @@ fn test_state_exists_in_starting_status_before_mutation() {
         1000,
         9040,
         5353,
-        "umbra".to_string(),
         UmbraStatus::Starting,
     );
 
@@ -209,7 +202,6 @@ fn test_startup_rejects_stale_starting_state() {
         1000,
         9040,
         5353,
-        "umbra".to_string(),
         UmbraStatus::Starting,
     );
     stale_state
@@ -290,7 +282,6 @@ fn test_proc_inspection_failure_becomes_unknown_or_returns_inspection_error() {
         1000,
         9040,
         5353,
-        "umbra".to_string(),
         UmbraStatus::Active,
     );
     active_state.save_to_path(tmp.path()).expect("save state");

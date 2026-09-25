@@ -63,19 +63,6 @@ fn test_cli_parse_recover_conflict() {
 }
 
 #[test]
-fn test_cli_parse_uninstall() {
-    let cli = Cli::try_parse_from(["umbra", "uninstall"]).expect("parse uninstall");
-    assert_eq!(cli.command, Commands::Uninstall { yes: false });
-
-    let cli_yes =
-        Cli::try_parse_from(["umbra", "uninstall", "--yes"]).expect("parse uninstall --yes");
-    assert_eq!(cli_yes.command, Commands::Uninstall { yes: true });
-
-    let cli_y = Cli::try_parse_from(["umbra", "uninstall", "-y"]).expect("parse uninstall -y");
-    assert_eq!(cli_y.command, Commands::Uninstall { yes: true });
-}
-
-#[test]
 fn test_recovery_options_defaults() {
     let opts = RecoveryOptions::default();
     assert_eq!(opts.state_file_override, None);
@@ -136,8 +123,6 @@ fn test_active_state_corrupt_validation() {
         tor_uid: 1000,
         tor_transport_port: 9040,
         tor_dns_port: 5353,
-        firewall_identity: "umbra".to_string(),
-        created_at_epoch: 1000,
     };
     assert!(invalid_version.validate().is_err());
 
@@ -152,8 +137,6 @@ fn test_active_state_corrupt_validation() {
         tor_uid: 1000,
         tor_transport_port: 9040,
         tor_dns_port: 5353,
-        firewall_identity: "umbra".to_string(),
-        created_at_epoch: 1000,
     };
     assert!(empty_iface.validate().is_err());
 }
@@ -185,8 +168,6 @@ fn test_active_state_mac_validation_strict() {
         tor_uid: 1000,
         tor_transport_port: 9040,
         tor_dns_port: 5353,
-        firewall_identity: "umbra".to_string(),
-        created_at_epoch: 1000,
     };
     assert!(invalid_orig_mac.validate().is_err());
 
@@ -201,8 +182,6 @@ fn test_active_state_mac_validation_strict() {
         tor_uid: 1000,
         tor_transport_port: 9040,
         tor_dns_port: 5353,
-        firewall_identity: "umbra".to_string(),
-        created_at_epoch: 1000,
     };
     assert!(zero_mac.validate().is_err());
 }

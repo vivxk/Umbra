@@ -93,9 +93,6 @@ pub enum UmbraError {
     #[error("Tor listener missing on port {port}: {details}")]
     TorListenerMissing { port: u16, details: String },
 
-    #[error("Tor configuration fragment ownership check failed: {0}")]
-    TorConfigOwnershipMismatch(String),
-
     #[error("Tor ControlPort authentication failed: {0}")]
     TorControlAuthFailed(String),
 
@@ -123,17 +120,11 @@ pub enum UmbraError {
         activation_id: String,
     },
 
-    #[error("Startup transaction aborted: {0}")]
-    StartupAborted(String),
-
     #[error("Recovery uncertain: safety invariant cannot be guaranteed, aborting to fail-closed state ({0})")]
     RecoveryUncertain(String),
 
     #[error("Root privileges required for operation '{0}'")]
     PrivilegeRequired(String),
-
-    #[error("System command failed: {command}: {details}")]
-    SystemCommandFailed { command: String, details: String },
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

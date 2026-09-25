@@ -20,9 +20,6 @@ eth0\t001ED80A\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0
             metric: 100,
         }]
     );
-
-    let ifaces = InterfaceController::parse_default_route_interfaces(route_table);
-    assert_eq!(ifaces, vec!["eth0"]);
 }
 
 #[test]
@@ -35,7 +32,9 @@ eth1\t00000000\t011ED80A\t0003\t0\t0\t200\t00000000\t0\t0\t0
 eth0\t00000000\t011ED80A\t0003\t0\t0\t100\t00000000\t0\t0\t0
 ";
 
-    let defaults = InterfaceController::parse_default_route_interfaces(route_table);
+    let mut candidates = InterfaceController::parse_default_routes(route_table);
+    candidates.sort_by_key(|c| c.metric);
+    let defaults: Vec<String> = candidates.into_iter().map(|c| c.interface).collect();
     assert_eq!(
         defaults,
         vec!["eth0", "eth1", "wlan0"],
@@ -134,7 +133,8 @@ lo\t00000000\t00000000\t0003\t0\t0\t0\t00000000\t0\t0\t0
 eth0\t00000000\t011ED80A\t0003\t0\t0\t100\t00000000\t0\t0\t0
 ";
 
-    let defaults = InterfaceController::parse_default_route_interfaces(route_table);
+    let candidates = InterfaceController::parse_default_routes(route_table);
+    let defaults: Vec<String> = candidates.into_iter().map(|c| c.interface).collect();
     assert_eq!(defaults, vec!["eth0"], "Loopback must be filtered out");
 }
 
@@ -148,7 +148,8 @@ eth_down\t00000000\t011ED80A\t0002\t0\t0\t50\t00000000\t0\t0\t0
 eth_up\t00000000\t011ED80A\t0003\t0\t0\t100\t00000000\t0\t0\t0
 ";
 
-    let defaults = InterfaceController::parse_default_route_interfaces(route_table);
+    let candidates = InterfaceController::parse_default_routes(route_table);
+    let defaults: Vec<String> = candidates.into_iter().map(|c| c.interface).collect();
     assert_eq!(
         defaults,
         vec!["eth_up"],

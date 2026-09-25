@@ -106,9 +106,7 @@ impl LiveVerifier {
                             tor_uid: state.tor_uid,
                             tor_transport_port: state.tor_transport_port,
                             tor_dns_port: state.tor_dns_port,
-                            egress_interface: state.interface.clone(),
                             activation_id: state.activation_id.clone(),
-                            ..Default::default()
                         };
                         match FirewallController::verify_live(&fw_config) {
                             Ok(_) => {
@@ -261,20 +259,6 @@ impl LiveVerifier {
                     ));
                     inspection_error = true;
                 }
-            }
-        }
-
-        // 7. Safe inspection of /etc/resolv.conf diagnostics
-        if let Ok(resolv) = crate::dns::DnsController::inspect_resolv_conf() {
-            if !resolv.nameservers.is_empty() {
-                details.push(format!(
-                    "dns: /etc/resolv.conf nameservers: {} (loopback-only: {})",
-                    resolv.nameservers.join(", "),
-                    resolv.loopback_only
-                ));
-            }
-            for warning in &resolv.warnings {
-                details.push(format!("dns: [warning] {warning}"));
             }
         }
 
