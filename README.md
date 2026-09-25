@@ -16,7 +16,6 @@ Umbra is a lightweight Linux utility written in safe Rust that enforces transpar
 - [Systemd Boot-Enforced Mode](#systemd-boot-enforced-mode)
 - [Uninstallation](#uninstallation)
 - [Testing & Leak Prevention Audit](#testing--leak-prevention-audit)
-- [Security Guardrails](#security-guardrails)
 - [License](#license)
 
 ---
