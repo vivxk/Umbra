@@ -87,7 +87,7 @@ impl InterfaceController {
     }
 
     /// Resolves the single authoritative egress interface from candidates.
-    /// Per Section 93: If multiple distinct interfaces share the lowest metric,
+    /// If multiple distinct interfaces share the lowest metric,
     /// egress is ambiguous and we must fail safely rather than arbitrarily choosing.
     pub fn resolve_authoritative_candidate(candidates: &[RouteCandidate]) -> Result<String> {
         if candidates.is_empty() {

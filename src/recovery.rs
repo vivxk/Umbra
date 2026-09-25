@@ -117,7 +117,7 @@ impl RecoveryController {
         };
 
         // 1. Restore Interface Baseline FIRST (MAC and administrative UP/DOWN state)
-        // Per Section 3: Invariant is to keep fail-closed firewall active until baseline restoration succeeds.
+        // Invariant: keep fail-closed firewall active until baseline restoration succeeds.
         let orig_mac = MacAddress::parse(&state.original_mac)?;
         let baseline = InterfaceBaseline {
             name: state.interface.clone(),

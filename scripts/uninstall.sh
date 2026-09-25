@@ -2,9 +2,8 @@
 set -euo pipefail
 
 # Umbra Uninstallation Script
-# Strictly verifies Umbra is INACTIVE before removal (refusing to uninstall if active,
-# per Section 89 of Umbra specification). Cleans only Umbra-owned config fragments
-# and files after verifying ownership markers.
+# Strictly verifies Umbra is INACTIVE before removal (refusing to uninstall if active).
+# Cleans only Umbra-owned config fragments and files after verifying ownership markers.
 # Supports DESTDIR and PREFIX for packagers and isolated testing.
 
 DESTDIR="${DESTDIR:-}"
@@ -25,10 +24,10 @@ fi
 
 echo "[*] Checking Umbra status prior to uninstallation..."
 
-# Section 89 Requirement: Verify that Umbra is NOT active before removal.
+# Verify that Umbra is NOT active before removal.
 IS_ACTIVE=0
 
-# Check 1: Live runtime state file (/run/umbra/active.json per Section 9 & Section 89)
+# Check 1: Live runtime state file (/run/umbra/active.json)
 if [ -f "$RUN_DIR/active.json" ] || [ -f "$RUN_DIR/state.json" ]; then
     echo "[!] Detected active runtime state file in $RUN_DIR"
     IS_ACTIVE=1

@@ -35,12 +35,12 @@ impl Default for FirewallConfig {
 pub struct FirewallController;
 
 impl FirewallController {
-    /// Generates the complete, atomic nftables ruleset specification.
+    /// Generates the complete, atomic nftables ruleset definition.
     /// Invariants enforced:
     /// 1. Tor UID is exempt from NAT redirection and filter drops.
-    /// 2. External IPv6 is completely dropped (Section 23 Strategy B) and never redirected.
+    /// 2. External IPv6 is completely dropped and never redirected.
     /// 3. UDP DNS (dport 53) is intercepted and redirected to Tor DNSPort.
-    /// 4. TCP DNS (dport 53) is rejected with TCP reset (never redirected to TransPort per Section 20).
+    /// 4. TCP DNS (dport 53) is rejected with TCP reset (never redirected to TransPort).
     /// 5. Non-Tor application TCP is redirected to Tor TransPort.
     /// 6. Arbitrary UDP and QUIC are blocked fail-closed.
     /// 7. Loopback IPC communications are preserved.

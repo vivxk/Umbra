@@ -7,6 +7,7 @@ use crate::constants::{
     DEFAULT_TOR_DNSPORT, DEFAULT_TOR_TRANSPORT, NFT_TABLE_FAMILY, NFT_TABLE_NAME,
     RUNTIME_STATE_FILE,
 };
+use crate::dns::DnsController;
 use crate::error::{Result, UmbraError};
 use crate::firewall::{FirewallConfig, FirewallController};
 use crate::interface::{InterfaceBaseline, InterfaceController};
@@ -93,14 +94,15 @@ impl StartupTransaction {
             ));
         }
 
-        // 2. Pre-flight Tor Verification (Sections 15, 33, 34)
-        // Verified BEFORE any host link/firewall mutations occur.
+        // 2. Pre-flight Tor Verification: listeners must be running and owned by Tor
+        // Verified before any host link/firewall mutations occur.
         let tor_ident = TorController::find_tor_process()?.ok_or(UmbraError::TorNotRunning)?;
         TorController::verify_transport_with_identity(options.transport_port, Some(&tor_ident))?;
         TorController::verify_dnsport_with_identity(options.dns_port, Some(&tor_ident))?;
+        DnsController::verify_local_resolution(options.dns_port)?;
         let tor_uid = tor_ident.uid;
 
-        // 3. Egress Interface Resolution (Section 93)
+        // 3. Egress Interface Resolution
         let iface = match options.interface_override {
             Some(name) => name,
             None => InterfaceController::detect_default_egress()?,
@@ -137,7 +139,7 @@ impl StartupTransaction {
         let mut mac_randomized = false;
         let mut firewall_installed = false;
 
-        // 7. Persist STARTING / recoverable runtime state BEFORE any host mutation (Section 4)
+        // 7. Persist STARTING / recoverable runtime state BEFORE any host mutation
         let mut active_state = ActiveState::new_with_status(
             activation_id,
             iface.clone(),
@@ -153,7 +155,7 @@ impl StartupTransaction {
 
         // Execution with transactional rollback protection
         let result: Result<StartupTransactionResult> = (|| {
-            // Atomically install restrictive firewall policy first (Section 31: restrictive before application traffic)
+            // Atomically install restrictive firewall policy first (restrictive before application traffic)
             FirewallController::install(&fw_config)?;
             firewall_installed = true;
 
@@ -236,7 +238,7 @@ impl StartupTransaction {
         }
 
         if !rollback_errors.is_empty() {
-            // Section 5: If rollback cannot restore baseline, preserve recovery state!
+            // Invariant: if rollback cannot restore baseline, preserve recovery state!
             active_state.status = UmbraStatus::RecoveryRequired;
             let _ = active_state.save_to_path(state_path);
 

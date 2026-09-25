@@ -30,9 +30,6 @@ pub const RUNTIME_STATE_FILE: &str = "/run/umbra/active.json";
 /// Process single-instance lock file path
 pub const LOCK_FILE: &str = "/run/umbra/umbra.lock";
 
-/// Primary known unprivileged Tor accounts on Linux distributions
-pub const KNOWN_TOR_USERS: &[&str] = &["debian-tor", "tor", "_tor"];
-
 /// Trusted filesystem prefixes for Tor binary execution
 pub const TRUSTED_TOR_PREFIXES: &[&str] = &["/usr/bin", "/usr/sbin", "/bin", "/sbin"];
 

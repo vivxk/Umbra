@@ -429,3 +429,41 @@ fn test_dns_resolution_question_mismatch_rejected() {
 
     server_handle.join().unwrap();
 }
+
+#[test]
+fn test_verify_local_resolution_mock() {
+    let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let server_port = server_sock.local_addr().unwrap().port();
+
+    let server_handle = std::thread::spawn(move || {
+        let mut buf = [0u8; 512];
+        let (bytes_read, peer) = server_sock.recv_from(&mut buf).unwrap();
+        let query_id = u16::from_be_bytes([buf[0], buf[1]]);
+
+        let mut resp = Vec::new();
+        resp.extend_from_slice(&query_id.to_be_bytes());
+        resp.extend_from_slice(&[0x81, 0x80]);
+        resp.extend_from_slice(&[0x00, 0x01]);
+        resp.extend_from_slice(&[0x00, 0x01]);
+        resp.extend_from_slice(&[0x00, 0x00]);
+        resp.extend_from_slice(&[0x00, 0x00]);
+        // Echo question
+        resp.extend_from_slice(&buf[12..bytes_read]);
+        // Answer
+        resp.extend_from_slice(&[0xC0, 0x0C]);
+        resp.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+        resp.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]);
+        resp.extend_from_slice(&[0x00, 0x04]);
+        resp.extend_from_slice(&[127, 0, 0, 1]);
+
+        server_sock.send_to(&resp, peer).unwrap();
+    });
+
+    let res = DnsController::verify_local_resolution(server_port);
+    assert!(
+        res.is_ok(),
+        "verify_local_resolution should succeed against mock: {res:?}"
+    );
+
+    server_handle.join().unwrap();
+}

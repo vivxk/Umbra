@@ -188,18 +188,25 @@ impl LiveVerifier {
             }
         }
 
-        // 4. Check Tor DNSPort
+        // 4. Check Tor DNSPort & DNS Resolution
         let dns_port = active_state
             .as_ref()
             .map(|s| s.tor_dns_port)
             .unwrap_or(DEFAULT_TOR_DNSPORT);
         match TorController::verify_dnsport_at(proc_dir, dns_port, verified_tor_ident.as_ref()) {
-            Ok(_) => {
-                dnsport_ok = true;
-                details.push(format!(
-                    "tor: DNSPort 127.0.0.1:{dns_port} is responding and verified"
-                ));
-            }
+            Ok(_) => match crate::dns::DnsController::verify_local_resolution(dns_port) {
+                Ok(_) => {
+                    dnsport_ok = true;
+                    details.push(format!(
+                        "tor: DNSPort 127.0.0.1:{dns_port} is responding and verified"
+                    ));
+                }
+                Err(e) => {
+                    details.push(format!(
+                        "dns: DNSPort 127.0.0.1:{dns_port} resolution test failed: {e}"
+                    ));
+                }
+            },
             Err(crate::error::UmbraError::TorInspectionError(e)) => {
                 details.push(format!("tor: DNSPort inspection error: {e}"));
                 inspection_error = true;
@@ -262,7 +269,7 @@ impl LiveVerifier {
             }
         }
 
-        // Determine aggregated status (Section 9: ACTIVE requires MAC integrity and full component health)
+        // Determine aggregated status: ACTIVE requires MAC integrity and full component health
         let status = if corrupt_state_err.is_some() {
             UmbraStatus::RecoveryRequired
         } else if let Some(ref state) = active_state {

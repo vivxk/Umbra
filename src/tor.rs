@@ -3,11 +3,11 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpStream, UdpSocket};
+use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::time::Duration;
 
-use crate::constants::{KNOWN_TOR_COOKIE_PATHS, KNOWN_TOR_USERS, LOCAL_LOOPBACK_IPV4};
+use crate::constants::{KNOWN_TOR_COOKIE_PATHS, LOCAL_LOOPBACK_IPV4};
 use crate::error::{Result, UmbraError};
 
 /// Information about a verified running Tor instance
@@ -165,7 +165,7 @@ pub fn verify_socket_ownership(
         }
     };
 
-    // Reject root-owned Tor socket unconditionally (Section 15)
+    // Reject root-owned Tor socket unconditionally.
     // Sockets created by systemd-managed Tor daemons before dropping privileges retain creator sk_uid=0 in /proc/net/tcp.
     // If socket.uid is 0, verify whether the actual owning process in /proc/<pid>/fd has dropped privileges to an unprivileged UID.
     let proc_uid = if socket.uid == 0 {
@@ -471,53 +471,6 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 pub struct TorController;
 
 impl TorController {
-    /// Discovers system UID for Tor (e.g. debian-tor or tor)
-    pub fn resolve_tor_uid() -> Result<u32> {
-        Self::resolve_tor_uid_with_paths(
-            Path::new("/proc"),
-            Path::new("/etc/passwd"),
-            Some(0),
-            crate::constants::TRUSTED_TOR_PREFIXES,
-        )
-    }
-
-    /// Discovers system UID for Tor using configurable proc and passwd paths
-    pub fn resolve_tor_uid_with_paths(
-        proc_dir: &Path,
-        passwd_path: &Path,
-        expected_owner_uid: Option<u32>,
-        trusted_prefixes: &[&str],
-    ) -> Result<u32> {
-        // First check running Tor process
-        if let Ok(Some(ident)) =
-            Self::find_tor_process_at(proc_dir, expected_owner_uid, trusted_prefixes)
-        {
-            return Ok(ident.uid);
-        }
-
-        // Fallback: parse passwd
-        if let Ok(passwd) = fs::read_to_string(passwd_path) {
-            for line in passwd.lines() {
-                let parts: Vec<&str> = line.split(':').collect();
-                if parts.len() >= 3 {
-                    let username = parts[0];
-                    if KNOWN_TOR_USERS.contains(&username) {
-                        if let Ok(uid) = parts[2].parse::<u32>() {
-                            if uid == 0 {
-                                return Err(UmbraError::TorRunningAsRoot);
-                            }
-                            return Ok(uid);
-                        }
-                    }
-                }
-            }
-        }
-
-        Err(UmbraError::TorIdentityUnknown(
-            "could not find Tor user account or running Tor process".to_string(),
-        ))
-    }
-
     /// Inspects /proc to find a verified Tor process
     pub fn find_tor_process() -> Result<Option<TorIdentity>> {
         Self::find_tor_process_at(
@@ -770,97 +723,7 @@ impl TorController {
             port,
             expected.map(|i| i.uid),
             expected.map(|i| i.pid),
-        )?;
-
-        let target_addr = format!("{LOCAL_LOOPBACK_IPV4}:{port}");
-        let socket = UdpSocket::bind("127.0.0.1:0").map_err(|e| {
-            UmbraError::DnsProtectionFailed(format!("failed to bind test UDP socket: {e}"))
-        })?;
-
-        socket
-            .set_read_timeout(Some(Duration::from_millis(1500)))
-            .map_err(|e| {
-                UmbraError::DnsProtectionFailed(format!("failed to set socket timeout: {e}"))
-            })?;
-
-        let parsed_target: SocketAddr =
-            target_addr
-                .parse()
-                .map_err(|_| UmbraError::TorListenerMissing {
-                    port,
-                    details: "invalid socket address".to_string(),
-                })?;
-
-        let _ = socket.connect(parsed_target);
-
-        // Query 1.0.0.127.in-addr.arpa (PTR) which Tor resolves immediately locally without requiring exit node circuits
-        let query_packet = [
-            0x12, 0x34, // ID
-            0x01, 0x00, // Standard query (RD=1)
-            0x00, 0x01, // QDCOUNT = 1
-            0x00, 0x00, // ANCOUNT = 0
-            0x00, 0x00, // NSCOUNT = 0
-            0x00, 0x00, // ARCOUNT = 0
-            0x01, b'1', 0x01, b'0', 0x01, b'0', 0x03, b'1', b'2', b'7', 0x07, b'i', b'n', b'-',
-            b'a', b'd', b'd', b'r', 0x04, b'a', b'r', b'p', b'a', 0x00, // End of name
-            0x00, 0x0C, // Type PTR (12)
-            0x00, 0x01, // Class IN (1)
-        ];
-
-        if let Err(e) = socket.send(&query_packet) {
-            if e.kind() == std::io::ErrorKind::ConnectionRefused || e.raw_os_error() == Some(111) {
-                return Err(UmbraError::TorListenerPortClosed {
-                    port,
-                    details: format!("DNSPort at {target_addr} connection refused: {e}"),
-                });
-            }
-            return Err(UmbraError::TorListenerMissing {
-                port,
-                details: format!("failed to send UDP test packet to {target_addr}: {e}"),
-            });
-        }
-
-        let mut buf = [0u8; 512];
-        match socket.recv(&mut buf) {
-            Ok(bytes_read) if bytes_read >= 12 => {
-                if buf[0] != 0x12 || buf[1] != 0x34 {
-                    return Err(UmbraError::TorListenerWrongProcess {
-                        port,
-                        expected: "valid DNS response matching query transaction ID".to_string(),
-                        actual: format!("mismatched transaction ID: {:02x}{:02x}", buf[0], buf[1]),
-                    });
-                }
-                Ok(())
-            }
-            Ok(_) => Err(UmbraError::TorListenerWrongProcess {
-                port,
-                expected: "DNS header (>= 12 bytes)".to_string(),
-                actual: "truncated response (< 12 bytes)".to_string(),
-            }),
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::ConnectionRefused
-                    || e.raw_os_error() == Some(111)
-                {
-                    Err(UmbraError::TorListenerPortClosed {
-                        port,
-                        details: format!("DNSPort at {target_addr} connection refused: {e}"),
-                    })
-                } else if e.kind() == std::io::ErrorKind::TimedOut
-                    || e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.raw_os_error() == Some(110)
-                {
-                    Err(UmbraError::TorListenerTimeout {
-                        port,
-                        details: format!("no response from DNSPort at {target_addr} (timed out)"),
-                    })
-                } else {
-                    Err(UmbraError::TorListenerMissing {
-                        port,
-                        details: format!("no response from DNSPort at {target_addr}: {e}"),
-                    })
-                }
-            }
-        }
+        )
     }
 
     /// Verifies that Tor ControlPort is bound on 127.0.0.1, owned by Tor, and speaks Tor Control protocol

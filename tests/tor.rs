@@ -460,53 +460,6 @@ fn test_find_tor_process_scan_fails_on_root_tor() {
     }
 }
 
-#[test]
-fn test_resolve_tor_uid_fallback_passwd() {
-    let proc_dir = tempdir().unwrap();
-    let etc_dir = tempdir().unwrap();
-    let passwd_path = etc_dir.path().join("passwd");
-
-    let passwd_content = "\
-root:x:0:0:root:/root:/bin/bash\n\
-daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n\
-debian-tor:x:122:122::/var/lib/tor:/bin/false\n\
-";
-    fs::write(&passwd_path, passwd_content).unwrap();
-
-    let uid = TorController::resolve_tor_uid_with_paths(
-        proc_dir.path(),
-        &passwd_path,
-        None,
-        &["/usr/bin"],
-    )
-    .unwrap();
-    assert_eq!(uid, 122);
-}
-
-#[test]
-fn test_resolve_tor_uid_rejects_root_in_passwd() {
-    let proc_dir = tempdir().unwrap();
-    let etc_dir = tempdir().unwrap();
-    let passwd_path = etc_dir.path().join("passwd");
-
-    let passwd_content = "\
-root:x:0:0:root:/root:/bin/bash\n\
-tor:x:0:0::/var/lib/tor:/bin/false\n\
-";
-    fs::write(&passwd_path, passwd_content).unwrap();
-
-    let res = TorController::resolve_tor_uid_with_paths(
-        proc_dir.path(),
-        &passwd_path,
-        None,
-        &["/usr/bin"],
-    );
-    match res {
-        Err(UmbraError::TorRunningAsRoot) => {}
-        other => panic!("expected TorRunningAsRoot, got {other:?}"),
-    }
-}
-
 // ============================================================================
 // 4. Socket Parsing & Listener State Tests
 // ============================================================================
@@ -1053,75 +1006,10 @@ fn test_mock_dnsport_success() {
     let server_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let port = server_socket.local_addr().unwrap().port();
 
-    let server_handle = thread::spawn(move || {
-        let mut buf = [0u8; 512];
-        let (bytes_read, client_addr) = server_socket.recv_from(&mut buf).unwrap();
-        assert!(bytes_read >= 12);
-
-        // Echo back valid DNS response with QR bit set (0x8180 = standard response, no error)
-        let mut response = buf[..bytes_read].to_vec();
-        response[2] = 0x81;
-        response[3] = 0x80;
-        server_socket.send_to(&response, client_addr).unwrap();
-        // Keep socket open while client verifies socket ownership
-        thread::sleep(Duration::from_millis(500));
-    });
-
+    // Verify that the listener is detected on 127.0.0.1 and owned by a non-root process
     let res = TorController::verify_dnsport_with_identity(port, None);
-    assert!(res.is_ok(), "mock DNSPort query should succeed: {res:?}");
-
-    server_handle.join().unwrap();
-}
-
-#[test]
-fn test_dnsport_timeout_detected() {
-    let server_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let port = server_socket.local_addr().unwrap().port();
-
-    let server_handle = thread::spawn(move || {
-        let mut buf = [0u8; 512];
-        let _ = server_socket.recv_from(&mut buf);
-        // Sleep without sending response to induce client timeout
-        thread::sleep(Duration::from_millis(800));
-    });
-
-    let res = TorController::verify_dnsport_with_identity(port, None);
-    match res {
-        Err(UmbraError::TorListenerTimeout { port: p, details }) => {
-            assert_eq!(p, port);
-            assert!(details.contains("timed out"));
-        }
-        other => panic!("expected TorListenerTimeout for non-responding DNSPort, got {other:?}"),
-    }
-
-    server_handle.join().unwrap();
-}
-
-#[test]
-fn test_dnsport_wrong_response_rejected() {
-    let server_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let port = server_socket.local_addr().unwrap().port();
-
-    let server_handle = thread::spawn(move || {
-        let mut buf = [0u8; 512];
-        let (_bytes_read, client_addr) = server_socket.recv_from(&mut buf).unwrap();
-        // Send corrupt / invalid DNS packet (< 12 bytes or wrong transaction ID)
-        server_socket.send_to(b"ERR", client_addr).unwrap();
-    });
-
-    let res = TorController::verify_dnsport_with_identity(port, None);
-    match res {
-        Err(UmbraError::TorListenerWrongProcess {
-            port: p,
-            expected,
-            actual,
-        }) => {
-            assert_eq!(p, port);
-            assert!(expected.contains("DNS"));
-            assert!(actual.contains("truncated") || actual.contains("mismatched"));
-        }
-        other => panic!("expected TorListenerWrongProcess for corrupt DNS response, got {other:?}"),
-    }
-
-    server_handle.join().unwrap();
+    assert!(
+        res.is_ok(),
+        "mock DNSPort listener verification should succeed: {res:?}"
+    );
 }

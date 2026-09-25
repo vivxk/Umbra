@@ -359,7 +359,7 @@ fn test_leak_clearnet_dns_udp_and_tcp() {
     }
 
     // B. Direct TCP DNS queries to public resolvers (8.8.8.8:53 and 1.1.1.1:53)
-    // Per Section 20, TCP port 53 must be rejected with TCP RST immediately,
+    // Direct TCP port 53 must be rejected with TCP RST immediately,
     // and must NEVER be redirected to Tor TransPort
     for target in ["8.8.8.8:53", "1.1.1.1:53"] {
         let tcp_res =

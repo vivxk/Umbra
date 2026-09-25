@@ -13,7 +13,7 @@ fn test_systemd_boot_service_template_invariants() {
 
     let content = fs::read_to_string(&service_path).expect("read systemd service file");
 
-    // Section 43 & Section 88 Invariants:
+    // Service Invariants:
     // 1. Must be oneshot with RemainAfterExit=yes (no resident daemon bloat)
     assert!(
         content.contains("Type=oneshot"),
@@ -297,7 +297,7 @@ fn test_uninstall_script_inactive_enforcement_and_safe_cleanup() {
         .expect("run install.sh");
     assert!(inst_status.success());
 
-    // 2. Section 89 inactive check: simulate active state file in /run/umbra/active.json
+    // 2. Inactive check: simulate active state file in /run/umbra/active.json
     let run_dir = destdir.join("run/umbra");
     fs::create_dir_all(&run_dir).unwrap();
     let active_state_file = run_dir.join("active.json");
@@ -339,7 +339,7 @@ fn test_uninstall_script_inactive_enforcement_and_safe_cleanup() {
         "Unmanaged config must NOT be deleted by uninstall.sh"
     );
 
-    // Test Section 21: Modified Umbra fragment (contains marker but altered content) is preserved
+    // Test: Modified Umbra fragment (contains marker but altered content) is preserved
     fs::write(
         &tor_fragment,
         "# umbra-managed: Umbra Tor Configuration Fragment\n# Custom user modification\nMyCustomTorOption 1\n",
@@ -353,7 +353,7 @@ fn test_uninstall_script_inactive_enforcement_and_safe_cleanup() {
     assert!(uninstall_modified_status.success());
     assert!(
         tor_fragment.exists(),
-        "User-modified fragment must be preserved per Section 21"
+        "User-modified fragment must be preserved"
     );
 
     // Now test standard managed file cleanup
