@@ -29,7 +29,10 @@ pub struct LiveVerifier;
 impl LiveVerifier {
     /// Conducts a comprehensive live verification against the actual kernel and processes
     pub fn verify_current_state() -> Result<VerificationReport> {
-        let active_state = ActiveState::load()?;
+        let (active_state, corrupt_state_err) = match ActiveState::load() {
+            Ok(s) => (s, None),
+            Err(e) => (None, Some(e)),
+        };
 
         let mut details = Vec::new();
         let mut firewall_ok = false;
@@ -39,9 +42,25 @@ impl LiveVerifier {
         let mut mac_matches_state = false;
         let mut live_mac_str = None;
         let mut interface_name = None;
+        let mut inspection_error = false;
+
+        if let Some(ref e) = corrupt_state_err {
+            details.push(format!(
+                "state: runtime state file is unreadable or corrupt: {e}"
+            ));
+        }
 
         // 1. Check Firewall
-        let table_exists = FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME)?;
+        let table_exists = match FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME)
+        {
+            Ok(exists) => exists,
+            Err(e) => {
+                details.push(format!("nftables: inspection error: {e}"));
+                inspection_error = true;
+                false
+            }
+        };
+
         if table_exists {
             let act_id = active_state.as_ref().map(|s| s.activation_id.as_str());
             match FirewallController::authenticate_ownership_with_id(
@@ -106,6 +125,7 @@ impl LiveVerifier {
             }
             Err(e) => {
                 details.push(format!("tor: inspection error: {e}"));
+                inspection_error = true;
             }
         }
 
@@ -123,6 +143,10 @@ impl LiveVerifier {
                 details.push(format!(
                     "tor: TransPort 127.0.0.1:{transport_port} is responding and verified"
                 ));
+            }
+            Err(crate::error::UmbraError::TorInspectionError(e)) => {
+                details.push(format!("tor: TransPort inspection error: {e}"));
+                inspection_error = true;
             }
             Err(e) => {
                 details.push(format!(
@@ -143,6 +167,10 @@ impl LiveVerifier {
                     "tor: DNSPort 127.0.0.1:{dns_port} is responding and verified"
                 ));
             }
+            Err(crate::error::UmbraError::TorInspectionError(e)) => {
+                details.push(format!("tor: DNSPort inspection error: {e}"));
+                inspection_error = true;
+            }
             Err(e) => {
                 details.push(format!("tor: DNSPort 127.0.0.1:{dns_port} failed: {e}"));
             }
@@ -160,6 +188,10 @@ impl LiveVerifier {
                 details.push(format!(
                     "tor: ControlPort 127.0.0.1:{control_port} is responding and verified"
                 ));
+            }
+            Err(crate::error::UmbraError::TorInspectionError(e)) => {
+                details.push(format!("tor: ControlPort inspection error: {e}"));
+                inspection_error = true;
             }
             Err(e) => {
                 details.push(format!("tor: ControlPort 127.0.0.1:{control_port}: {e}"));
@@ -201,8 +233,16 @@ impl LiveVerifier {
         }
 
         // Determine aggregated status (Section 9: ACTIVE requires MAC integrity and full component health)
-        let status = if let Some(ref _state) = active_state {
-            if firewall_ok && tor_process_ok && transport_ok && dnsport_ok {
+        let status = if corrupt_state_err.is_some() {
+            UmbraStatus::RecoveryRequired
+        } else if let Some(ref state) = active_state {
+            if state.status == UmbraStatus::Starting {
+                UmbraStatus::Starting
+            } else if state.status == UmbraStatus::RecoveryRequired {
+                UmbraStatus::RecoveryRequired
+            } else if inspection_error {
+                UmbraStatus::Unknown
+            } else if firewall_ok && tor_process_ok && transport_ok && dnsport_ok {
                 if mac_matches_state {
                     UmbraStatus::Active
                 } else if live_mac_str.is_none() {
@@ -213,8 +253,10 @@ impl LiveVerifier {
             } else {
                 UmbraStatus::RecoveryRequired
             }
-        } else if !firewall_ok {
+        } else if !table_exists {
             UmbraStatus::Inactive
+        } else if inspection_error {
+            UmbraStatus::Unknown
         } else {
             // No runtime state, but firewall table exists!
             UmbraStatus::RecoveryRequired

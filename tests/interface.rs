@@ -249,6 +249,23 @@ fn test_sysfs_baseline_capture_rejects_all_zeros_and_multicast_mac() {
 }
 
 #[test]
+fn test_sysfs_baseline_capture_rejects_tunnel_interface_type() {
+    let temp = tempdir().expect("create temp dir");
+    let iface_dir = temp.path().join("wg0");
+    fs::create_dir_all(&iface_dir).expect("create iface dir");
+    fs::write(iface_dir.join("address"), "02:aa:bb:cc:dd:ee\n").unwrap();
+    fs::write(iface_dir.join("flags"), "0x1003\n").unwrap();
+    // dev_type 65534 (tun/wireguard, not ARPHRD_ETHER 1)
+    fs::write(iface_dir.join("type"), "65534\n").unwrap();
+
+    let res = InterfaceController::capture_baseline_from_sysfs(temp.path(), "wg0");
+    assert!(
+        matches!(res, Err(UmbraError::InvalidMacAddress(ref msg)) if msg.contains("tunnel/point-to-point")),
+        "Tunnel interface type must be rejected safely"
+    );
+}
+
+#[test]
 fn test_apply_and_restore_reject_loopback() {
     let valid_mac = MacAddress::generate_random().unwrap();
     let res = InterfaceController::apply_mac("lo", valid_mac);

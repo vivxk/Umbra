@@ -403,7 +403,34 @@ table inet umbra {
     assert!(child.wait().unwrap().success());
     assert!(FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap());
 
-    let dummy_state = std::path::PathBuf::from("/tmp/umbra_rec_rogue_state.json");
+    let dev_name = "dum_rogue0";
+    let orig_mac = "02:aa:bb:cc:dd:ee";
+    let _ = Command::new("ip")
+        .args([
+            "link", "add", dev_name, "address", orig_mac, "type", "dummy",
+        ])
+        .status();
+    let _ = Command::new("ip")
+        .args(["link", "set", dev_name, "up"])
+        .status();
+
+    let tmp = NamedTempFile::new().expect("tempfile");
+    let dummy_state = tmp.path().to_path_buf();
+    drop(tmp);
+
+    let state = ActiveState::new(
+        "act_rogue_test".to_string(),
+        dev_name.to_string(),
+        orig_mac.to_string(),
+        "02:11:22:33:44:55".to_string(),
+        true,
+        1000,
+        9040,
+        5353,
+        "umbra".to_string(),
+    );
+    state.save_to_path(&dummy_state).expect("save state");
+
     let opts = RecoveryOptions {
         state_file_override: Some(dummy_state.to_string_lossy().to_string()),
         ..Default::default()
@@ -445,7 +472,9 @@ table inet umbra {
         "unauthorized table must NOT be deleted by stop"
     );
 
-    // Clean up rogue table manually
+    // Clean up rogue table and dummy device manually
+    let _ = fs::remove_file(&dummy_state);
+    let _ = Command::new("ip").args(["link", "del", dev_name]).status();
     let _ = Command::new("nft")
         .args(["delete", "table", "inet", "umbra"])
         .status();
@@ -597,6 +626,12 @@ fn test_recover_normal_fails_and_preserves_state_on_mac_restore_error_in_netns()
         "state file must NOT be deleted when interface restoration fails"
     );
 
+    // CRITICAL: firewall table MUST remain active and fail-closed
+    assert!(
+        FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap(),
+        "firewall table must remain intact when MAC restore fails during recover_normal"
+    );
+
     // Clean up
     let _ = fs::remove_file(state_path);
     let _ = FirewallController::teardown(NFT_TABLE_FAMILY, NFT_TABLE_NAME);
@@ -744,4 +779,126 @@ fn test_crash_resilience_subprocess_crash_in_netns() {
     assert!(!FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap());
 
     let _ = Command::new("ip").args(["link", "del", dev_name]).status();
+}
+
+#[test]
+fn test_stop_fails_and_keeps_firewall_on_mac_restore_error_in_netns() {
+    if !is_in_isolated_netns() {
+        let netns = match IsolatedNetns::new("rec_stop_err_pres") {
+            Some(ns) => ns,
+            None => return,
+        };
+        netns.run_test("test_stop_fails_and_keeps_firewall_on_mac_restore_error_in_netns");
+        return;
+    }
+
+    let fw_config = get_test_fw_config("lo");
+    FirewallController::install(&fw_config).expect("install firewall");
+    assert!(FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap());
+
+    let tmp = NamedTempFile::new().expect("create temp state file");
+    let state_path = tmp.path().to_path_buf();
+    drop(tmp);
+
+    // State points to a non-existent interface "dum_nonexistent_dev"
+    let state = ActiveState::new(
+        fw_config.activation_id.clone(),
+        "dum_nonexistent_dev".to_string(),
+        "02:aa:bb:cc:dd:77".to_string(),
+        "02:77:88:99:aa:bb".to_string(),
+        true,
+        fw_config.tor_uid,
+        fw_config.tor_transport_port,
+        fw_config.tor_dns_port,
+        fw_config.table_name.clone(),
+    );
+    state.save_to_path(&state_path).expect("save state");
+
+    let opts = RecoveryOptions {
+        state_file_override: Some(state_path.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+
+    // Stop MUST fail because baseline MAC cannot be restored on non-existent device
+    let res = RecoveryController::stop_with_options(&opts);
+    assert!(res.is_err(), "stop must fail when MAC restore fails");
+
+    // CRITICAL: Firewall table MUST remain active and fail-closed
+    assert!(
+        FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap(),
+        "firewall table must remain intact if MAC restore fails during stop"
+    );
+
+    // CRITICAL: state file MUST be preserved on disk
+    assert!(
+        state_path.exists(),
+        "state file must NOT be deleted when interface restoration fails during stop"
+    );
+
+    // Clean up
+    let _ = fs::remove_file(state_path);
+    let _ = FirewallController::teardown(NFT_TABLE_FAMILY, NFT_TABLE_NAME);
+}
+
+#[test]
+fn test_recover_force_fails_and_preserves_state_on_mac_restore_error_in_netns() {
+    if !is_in_isolated_netns() {
+        let netns = match IsolatedNetns::new("rec_frc_err_pres") {
+            Some(ns) => ns,
+            None => return,
+        };
+        netns
+            .run_test("test_recover_force_fails_and_preserves_state_on_mac_restore_error_in_netns");
+        return;
+    }
+
+    let fw_config = get_test_fw_config("lo");
+    FirewallController::install(&fw_config).expect("install firewall");
+    assert!(FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap());
+
+    let tmp = NamedTempFile::new().expect("create temp state file");
+    let state_path = tmp.path().to_path_buf();
+    drop(tmp);
+
+    // Valid state file pointing to nonexistent interface "dum_nonexistent_force"
+    let state = ActiveState::new(
+        fw_config.activation_id.clone(),
+        "dum_nonexistent_force".to_string(),
+        "02:aa:bb:cc:dd:88".to_string(),
+        "02:88:99:aa:bb:cc".to_string(),
+        true,
+        fw_config.tor_uid,
+        fw_config.tor_transport_port,
+        fw_config.tor_dns_port,
+        fw_config.table_name.clone(),
+    );
+    state.save_to_path(&state_path).expect("save state");
+
+    let opts = RecoveryOptions {
+        state_file_override: Some(state_path.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+
+    // Force recovery MUST fail because baseline restoration failed on non-existent device
+    let res = RecoveryController::recover_force_with_options(&opts);
+    assert!(
+        res.is_err(),
+        "force recovery must fail when salvageable MAC restore fails"
+    );
+
+    // CRITICAL: state file MUST be preserved on disk
+    assert!(
+        state_path.exists(),
+        "state file must NOT be deleted when force recovery encounters restoration error"
+    );
+
+    // CRITICAL: firewall table MUST remain active and fail-closed
+    assert!(
+        FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap(),
+        "firewall table must remain intact when force recovery encounters restoration error"
+    );
+
+    // Clean up
+    let _ = fs::remove_file(state_path);
+    let _ = FirewallController::teardown(NFT_TABLE_FAMILY, NFT_TABLE_NAME);
 }

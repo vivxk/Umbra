@@ -4,7 +4,9 @@ use umbra::constants::{NFT_TABLE_FAMILY, NFT_TABLE_NAME};
 use umbra::error::UmbraError;
 use umbra::firewall::{FirewallConfig, FirewallController};
 use umbra::mac::MacAddress;
+use umbra::runtime_state::{ActiveState, UmbraStatus};
 use umbra::tor::TorController;
+use umbra::transaction::{StartupTransaction, StartupTransactionOptions};
 
 #[test]
 fn test_multiple_valid_tor_processes_reported_as_ambiguous() {
@@ -143,4 +145,124 @@ fn test_activation_id_mismatch_authenticates_fail() {
 
     // Does NOT match wrong ID
     assert!(!ruleset.contains("umbra-managed:act_wrong_999"));
+}
+
+#[test]
+fn test_state_exists_in_starting_status_before_mutation() {
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let state_path = tmp.path().to_path_buf();
+    drop(tmp);
+
+    let state = ActiveState::new_with_status(
+        "act_starting_pre_mutation".to_string(),
+        "eth0".to_string(),
+        "02:aa:bb:cc:dd:ee".to_string(),
+        "02:11:22:33:44:55".to_string(),
+        true,
+        1000,
+        9040,
+        5353,
+        "umbra".to_string(),
+        UmbraStatus::Starting,
+    );
+
+    assert_eq!(state.status, UmbraStatus::Starting);
+    assert!(
+        state.validate().is_ok(),
+        "Starting state must validate successfully"
+    );
+
+    state.save_to_path(&state_path).expect("save state");
+    assert!(state_path.exists(), "State file must exist on disk");
+
+    let loaded = ActiveState::load_from_path(&state_path)
+        .unwrap()
+        .expect("load state");
+    assert_eq!(loaded.status, UmbraStatus::Starting);
+    assert_eq!(loaded.activation_id, "act_starting_pre_mutation");
+
+    let _ = std::fs::remove_file(state_path);
+}
+
+#[test]
+fn test_startup_rejects_stale_starting_state() {
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let stale_state = ActiveState::new_with_status(
+        "act_stale_start_123".to_string(),
+        "eth0".to_string(),
+        "02:aa:bb:cc:dd:ee".to_string(),
+        "02:11:22:33:44:55".to_string(),
+        true,
+        1000,
+        9040,
+        5353,
+        "umbra".to_string(),
+        UmbraStatus::Starting,
+    );
+    stale_state
+        .save_to_path(tmp.path())
+        .expect("save stale starting state");
+
+    let opts = StartupTransactionOptions {
+        interface_override: Some("eth0".to_string()),
+        transport_port: 9040,
+        dns_port: 5353,
+        state_file_override: Some(tmp.path().to_string_lossy().to_string()),
+        ..Default::default()
+    };
+
+    let result = StartupTransaction::execute(opts);
+    assert!(
+        result.is_err(),
+        "Duplicate start on stale Starting state must be refused"
+    );
+    match result.unwrap_err() {
+        UmbraError::AlreadyActive {
+            interface,
+            activation_id,
+        } => {
+            assert_eq!(interface, "eth0");
+            assert_eq!(activation_id, "act_stale_start_123");
+        }
+        other => panic!("expected AlreadyActive error, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_proc_inspection_failure_becomes_unknown_or_returns_inspection_error() {
+    let dummy_path = std::path::Path::new("/nonexistent_dir_umbra/proc/net/tcp");
+    let err = umbra::tor::find_socket_in_proc_net(dummy_path, 9040).unwrap_err();
+    match err {
+        UmbraError::TorInspectionError(msg) => {
+            assert!(msg.contains("failed to read") || msg.contains("does not exist"));
+        }
+        other => panic!("expected TorInspectionError, got {other:?}"),
+    }
+
+    let err2 = umbra::tor::verify_socket_ownership(
+        dummy_path,
+        std::path::Path::new("/nonexistent_dir_umbra/proc"),
+        9040,
+        Some(1000),
+        Some(1234),
+    )
+    .unwrap_err();
+    match err2 {
+        UmbraError::TorInspectionError(msg) => {
+            assert!(msg.contains("does not exist"));
+        }
+        other => panic!("expected TorInspectionError, got {other:?}"),
+    }
+
+    let err3 = umbra::tor::find_socket_inode_owner(
+        std::path::Path::new("/nonexistent_dir_umbra/proc"),
+        12345,
+    )
+    .unwrap_err();
+    match err3 {
+        UmbraError::TorInspectionError(msg) => {
+            assert!(msg.contains("failed to read proc directory"));
+        }
+        other => panic!("expected TorInspectionError, got {other:?}"),
+    }
 }

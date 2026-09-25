@@ -144,6 +144,143 @@ fn test_install_script_lifecycle_and_security_checks() {
 }
 
 #[test]
+fn test_installer_and_uninstaller_hardening_invariants() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let install_sh = repo_root.join("scripts/install.sh");
+    let uninstall_sh = repo_root.join("scripts/uninstall.sh");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let destdir = tmp.path();
+
+    // 14. Unmanaged /usr/bin/umbra is not overwritten
+    let bin_dir = destdir.join("usr/bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let foreign_bin = bin_dir.join("umbra");
+    fs::write(&foreign_bin, "#!/bin/sh\necho foreign\n").unwrap();
+    fs::set_permissions(&foreign_bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let res = Command::new("bash")
+        .arg(&install_sh)
+        .env("DESTDIR", destdir)
+        .status()
+        .expect("run install.sh");
+    assert!(
+        !res.success(),
+        "install.sh must refuse to overwrite unmanaged /usr/bin/umbra"
+    );
+    assert_eq!(
+        fs::read_to_string(&foreign_bin).unwrap(),
+        "#!/bin/sh\necho foreign\n"
+    );
+    fs::remove_file(&foreign_bin).unwrap();
+
+    // 15. Unmanaged /usr/local/bin/umbra is not overwritten
+    let local_bin_dir = destdir.join("usr/local/bin");
+    fs::create_dir_all(&local_bin_dir).unwrap();
+    let foreign_local = local_bin_dir.join("umbra");
+    fs::write(&foreign_local, "unmanaged regular file").unwrap();
+
+    let res = Command::new("bash")
+        .arg(&install_sh)
+        .env("DESTDIR", destdir)
+        .status()
+        .expect("run install.sh");
+    assert!(
+        !res.success(),
+        "install.sh must refuse to overwrite unmanaged regular file at /usr/local/bin/umbra"
+    );
+    fs::remove_file(&foreign_local).unwrap();
+
+    // 18. Unmanaged systemd unit is not overwritten
+    let sys_dir = destdir.join("etc/systemd/system");
+    fs::create_dir_all(&sys_dir).unwrap();
+    let foreign_unit = sys_dir.join("umbra-boot.service");
+    fs::write(
+        &foreign_unit,
+        "[Unit]\nDescription=Foreign Unrelated Service\n",
+    )
+    .unwrap();
+
+    let res = Command::new("bash")
+        .arg(&install_sh)
+        .env("DESTDIR", destdir)
+        .status()
+        .expect("run install.sh");
+    assert!(
+        !res.success(),
+        "install.sh must refuse to overwrite unmanaged systemd unit"
+    );
+    assert_eq!(
+        fs::read_to_string(&foreign_unit).unwrap(),
+        "[Unit]\nDescription=Foreign Unrelated Service\n"
+    );
+    fs::remove_file(&foreign_unit).unwrap();
+
+    // 20. Insecure Tor configuration directory prevents install (group/world writable)
+    let torrc_dir = destdir.join("etc/tor/torrc.d");
+    fs::create_dir_all(&torrc_dir).unwrap();
+    fs::set_permissions(&torrc_dir, fs::Permissions::from_mode(0o777)).unwrap();
+
+    let res = Command::new("bash")
+        .arg(&install_sh)
+        .env("DESTDIR", destdir)
+        .status()
+        .expect("run install.sh on insecure torrc.d");
+    assert!(
+        !res.success(),
+        "install.sh must refuse to install into world-writable /etc/tor/torrc.d"
+    );
+    fs::set_permissions(&torrc_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // 19. systemd stop/disable failure prevents unsafe uninstall
+    let mock_bin = tmp.path().join("mock_bin");
+    fs::create_dir_all(&mock_bin).unwrap();
+    let mock_systemctl = mock_bin.join("systemctl");
+    fs::write(
+        &mock_systemctl,
+        "#!/bin/sh\nif [ \"$1\" = \"is-active\" ]; then exit 0; elif [ \"$1\" = \"stop\" ]; then exit 1; fi\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&mock_systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Clean install first
+    let res = Command::new("bash")
+        .arg(&install_sh)
+        .env("DESTDIR", destdir)
+        .status()
+        .expect("run install.sh");
+    assert!(res.success(), "Clean install should succeed");
+
+    let path_env = format!(
+        "{}:{}",
+        mock_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let uninst_res = Command::new("bash")
+        .arg(&uninstall_sh)
+        .env("DESTDIR", destdir)
+        .env("FORCE_SYSTEMD_CHECK", "1")
+        .env("PATH", path_env)
+        .status()
+        .expect("run uninstall.sh with failing systemctl");
+    assert!(
+        !uninst_res.success(),
+        "uninstall.sh must abort when systemctl stop fails"
+    );
+    // Binaries and unit must remain intact because uninstall was aborted
+    assert!(
+        destdir.join("usr/bin/umbra").exists(),
+        "binary must remain intact after aborted uninstall"
+    );
+    assert!(
+        destdir
+            .join("etc/systemd/system/umbra-boot.service")
+            .exists(),
+        "service unit must remain intact after aborted uninstall"
+    );
+}
+
+#[test]
 fn test_uninstall_script_inactive_enforcement_and_safe_cleanup() {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let install_sh = repo_root.join("scripts/install.sh");

@@ -36,6 +36,7 @@ fn test_startup_rejects_already_active_session() {
         transport_port: 9040,
         dns_port: 5353,
         state_file_override: Some(tmp.path().to_string_lossy().to_string()),
+        ..Default::default()
     };
 
     let result = StartupTransaction::execute(opts);
@@ -64,6 +65,7 @@ fn test_startup_fails_closed_when_tor_is_not_running() {
         transport_port: 65432, // Non-existent port
         dns_port: 65433,
         state_file_override: Some(path.to_string_lossy().to_string()),
+        ..Default::default()
     };
 
     let result = StartupTransaction::execute(opts);

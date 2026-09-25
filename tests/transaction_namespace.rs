@@ -1,14 +1,16 @@
 mod common;
 
+use std::fs;
 use std::process::Command;
 use tempfile::NamedTempFile;
 
 use common::{is_in_isolated_netns, IsolatedNetns};
 use umbra::constants::{NFT_TABLE_FAMILY, NFT_TABLE_NAME};
 use umbra::error::UmbraError;
-use umbra::firewall::FirewallController;
-use umbra::interface::InterfaceController;
+use umbra::firewall::{FirewallConfig, FirewallController};
+use umbra::interface::{InterfaceBaseline, InterfaceController};
 use umbra::mac::MacAddress;
+use umbra::runtime_state::{ActiveState, UmbraStatus};
 use umbra::system::ProcessLock;
 use umbra::transaction::{StartupTransaction, StartupTransactionOptions};
 
@@ -68,6 +70,7 @@ fn test_startup_preflight_tor_missing_fails_closed_in_netns() {
         transport_port: 9040,
         dns_port: 5353,
         state_file_override: Some(state_path.to_string_lossy().to_string()),
+        ..Default::default()
     };
 
     // Execute startup transaction with no Tor process running
@@ -119,6 +122,7 @@ fn test_startup_rejects_orphan_table_in_netns() {
         transport_port: 9040,
         dns_port: 5353,
         state_file_override: None,
+        ..Default::default()
     };
 
     let result = StartupTransaction::execute(opts);
@@ -134,4 +138,105 @@ fn test_startup_rejects_orphan_table_in_netns() {
     let _ = Command::new("nft")
         .args(["delete", "table", "inet", "umbra"])
         .status();
+}
+
+#[test]
+fn test_interface_restoration_failure_during_rollback_keeps_recovery_state_in_netns() {
+    if !is_in_isolated_netns() {
+        let netns = match IsolatedNetns::new("trans_rollback_err") {
+            Some(ns) => ns,
+            None => return,
+        };
+        netns.run_test(
+            "test_interface_restoration_failure_during_rollback_keeps_recovery_state_in_netns",
+        );
+        return;
+    }
+
+    let dev_name = "dum_nonexistent_rb";
+    let orig_mac = MacAddress::parse("02:aa:bb:cc:dd:99").unwrap();
+    let baseline = InterfaceBaseline {
+        name: dev_name.to_string(),
+        original_mac: orig_mac,
+        was_up: true,
+    };
+
+    let fw_config = FirewallConfig {
+        table_name: NFT_TABLE_NAME.to_string(),
+        table_family: NFT_TABLE_FAMILY.to_string(),
+        tor_uid: 1000,
+        tor_transport_port: 9040,
+        tor_dns_port: 5353,
+        tor_control_port: 9051,
+        egress_interface: dev_name.to_string(),
+        activation_id: "act_rb_test".to_string(),
+    };
+
+    FirewallController::install(&fw_config).expect("install firewall");
+    assert!(FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap());
+
+    let tmp = NamedTempFile::new().expect("create temp state file");
+    let state_path = tmp.path().to_path_buf();
+    drop(tmp);
+
+    let mut active_state = ActiveState::new_with_status(
+        fw_config.activation_id.clone(),
+        dev_name.to_string(),
+        orig_mac.to_string(),
+        "02:99:aa:bb:cc:dd".to_string(),
+        true,
+        fw_config.tor_uid,
+        fw_config.tor_transport_port,
+        fw_config.tor_dns_port,
+        fw_config.table_name.clone(),
+        UmbraStatus::Starting,
+    );
+    active_state.save_to_path(&state_path).expect("save state");
+
+    // Invoke rollback with mac_randomized = true, firewall_installed = true
+    let res = StartupTransaction::rollback(
+        &baseline,
+        &fw_config,
+        true,
+        true,
+        &state_path,
+        &mut active_state,
+    );
+
+    assert!(
+        res.is_err(),
+        "rollback must fail when interface cannot be restored"
+    );
+    match res.unwrap_err() {
+        UmbraError::RecoveryUncertain(msg) => {
+            assert!(msg.contains("failed to restore baseline MAC"));
+        }
+        other => panic!("expected RecoveryUncertain, got {other:?}"),
+    }
+
+    // Invariants:
+    // 1. State file exists on disk
+    assert!(state_path.exists(), "State file must be preserved");
+    let loaded = ActiveState::load_from_path(&state_path)
+        .unwrap()
+        .expect("loaded state");
+    // 2. State status is RecoveryRequired
+    assert_eq!(
+        loaded.status,
+        UmbraStatus::RecoveryRequired,
+        "Status must be RecoveryRequired after rollback interface failure"
+    );
+    // 3. Firewall table remains intact in kernel
+    assert!(
+        FirewallController::table_exists(NFT_TABLE_FAMILY, NFT_TABLE_NAME).unwrap(),
+        "Firewall table must remain intact after rollback interface failure"
+    );
+
+    // Clean up
+    let _ = fs::remove_file(state_path);
+    let _ = FirewallController::teardown_with_id(
+        &fw_config.table_family,
+        &fw_config.table_name,
+        Some(&fw_config.activation_id),
+    );
 }

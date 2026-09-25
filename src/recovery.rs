@@ -116,14 +116,8 @@ impl RecoveryController {
             }
         };
 
-        // 1. Teardown Firewall with strict ownership authentication and activation ID check
-        FirewallController::teardown_with_id(
-            &options.table_family,
-            &options.table_name,
-            Some(&state.activation_id),
-        )?;
-
-        // 2. Restore Interface Baseline (MAC and administrative UP/DOWN state)
+        // 1. Restore Interface Baseline FIRST (MAC and administrative UP/DOWN state)
+        // Per Section 3: Invariant is to keep fail-closed firewall active until baseline restoration succeeds.
         let orig_mac = MacAddress::parse(&state.original_mac)?;
         let baseline = InterfaceBaseline {
             name: state.interface.clone(),
@@ -132,6 +126,20 @@ impl RecoveryController {
         };
 
         InterfaceController::restore_baseline(&baseline)?;
+
+        // 2. Teardown Firewall with strict ownership authentication and activation ID check
+        FirewallController::teardown_with_id(
+            &options.table_family,
+            &options.table_name,
+            Some(&state.activation_id),
+        )?;
+
+        // Verify firewall removal
+        if FirewallController::table_exists(&options.table_family, &options.table_name)? {
+            return Err(UmbraError::FirewallTeardownFailed(
+                "Firewall table remains active after teardown attempt".to_string(),
+            ));
+        }
 
         // 3. Remove runtime state file only after restoration verification succeeds
         ActiveState::remove_from_path(state_path)?;
@@ -178,26 +186,11 @@ impl RecoveryController {
             }
         };
 
-        // 1. Reconcile Firewall
         let table_present =
             FirewallController::table_exists(&options.table_family, &options.table_name)?;
-        if table_present {
-            // Strictly authenticate before removal
-            FirewallController::authenticate_ownership(&options.table_family, &options.table_name)?;
-            FirewallController::teardown(&options.table_family, &options.table_name)?;
-            actions.push(format!(
-                "Successfully authenticated and removed Umbra firewall table {} {}",
-                options.table_family, options.table_name
-            ));
-        } else {
-            actions.push(format!(
-                "Firewall table {} {} was not present",
-                options.table_family, options.table_name
-            ));
-        }
 
-        // 2. Reconcile Interface / MAC
-        if let Some(state) = loaded_state {
+        // 1. Reconcile Interface / MAC FIRST before touching fail-closed firewall
+        if let Some(ref state) = loaded_state {
             let orig_mac = MacAddress::parse(&state.original_mac).map_err(|e| {
                 UmbraError::RecoveryUncertain(format!(
                     "Invalid original MAC recorded in state ({}): {e}. Use 'umbra recover --force' to force recovery.",
@@ -211,24 +204,52 @@ impl RecoveryController {
                 was_up: state.interface_was_up,
             };
 
-            // Restoring baseline MUST NOT swallow errors
+            // Restoring baseline MUST NOT swallow errors; if MAC restore fails, firewall remains active!
             InterfaceController::restore_baseline(&baseline)?;
             actions.push(format!(
                 "Restored interface {} to original MAC {}",
                 state.interface, state.original_mac
             ));
-
-            // Only remove state file AFTER successful interface restoration
-            ActiveState::remove_from_path(state_path)?;
-            actions.push(format!(
-                "Cleared runtime state file {}",
-                state_path.display()
+        } else if table_present {
+            return Err(UmbraError::RecoveryUncertain(
+                "Cannot cleanly recover normally: runtime state file is absent but firewall table exists. Interface baseline MAC cannot be determined. Use 'umbra recover --force' to force recovery."
+                    .to_string(),
             ));
         } else {
             actions.push("No active runtime state file found to restore MAC".to_string());
         }
 
-        // 3. Release lock and clean lock file
+        // 2. Reconcile Firewall only after baseline restoration succeeds
+        if table_present {
+            // Strictly authenticate before removal
+            FirewallController::authenticate_ownership(&options.table_family, &options.table_name)?;
+            FirewallController::teardown(&options.table_family, &options.table_name)?;
+            if FirewallController::table_exists(&options.table_family, &options.table_name)? {
+                return Err(UmbraError::FirewallTeardownFailed(
+                    "Firewall table remains active after teardown attempt".to_string(),
+                ));
+            }
+            actions.push(format!(
+                "Successfully authenticated and removed Umbra firewall table {} {}",
+                options.table_family, options.table_name
+            ));
+        } else {
+            actions.push(format!(
+                "Firewall table {} {} was not present",
+                options.table_family, options.table_name
+            ));
+        }
+
+        // 3. Clear runtime state file AFTER successful interface and firewall restoration
+        if loaded_state.is_some() {
+            ActiveState::remove_from_path(state_path)?;
+            actions.push(format!(
+                "Cleared runtime state file {}",
+                state_path.display()
+            ));
+        }
+
+        // 4. Release lock and clean lock file
         drop(lock);
         let _ = ProcessLock::cleanup_path(&lock_path);
         actions.push("Cleaned lock file".to_string());
@@ -263,7 +284,70 @@ impl RecoveryController {
             .map(Path::new)
             .unwrap_or_else(|| Path::new(RUNTIME_STATE_FILE));
 
-        // 1. Inspect and Reconcile Firewall
+        // 1. Reconcile Interface / MAC first (before touching firewall)
+        let loaded_state = ActiveState::load_from_path(state_path);
+        let mut baseline_restoration_succeeded = false;
+        let mut has_salvageable_data = false;
+
+        match loaded_state {
+            Ok(Some(state)) => {
+                has_salvageable_data = true;
+                // State was readable despite force mode
+                let orig_mac = MacAddress::parse(&state.original_mac).map_err(|e| {
+                    UmbraError::RecoveryUncertain(format!(
+                        "Force recovery state file had invalid MAC '{}': {e}. Runtime state and firewall preserved.",
+                        state.original_mac
+                    ))
+                })?;
+
+                let baseline = InterfaceBaseline {
+                    name: state.interface.clone(),
+                    original_mac: orig_mac,
+                    was_up: state.interface_was_up,
+                };
+                InterfaceController::restore_baseline(&baseline).map_err(|e| {
+                    UmbraError::RecoveryUncertain(format!(
+                        "Force recovery failed to restore interface {}: {e}. Runtime state and firewall preserved.",
+                        state.interface
+                    ))
+                })?;
+                actions.push(format!(
+                    "Restored interface {} to original MAC {}",
+                    state.interface, state.original_mac
+                ));
+                baseline_restoration_succeeded = true;
+            }
+            Ok(None) => {
+                actions.push(
+                    "Warning: runtime state file was absent; baseline MAC unknown, interface MAC not restored. Please verify network manager or re-plug interface if MAC was changed."
+                        .to_string(),
+                );
+            }
+            Err(e) => {
+                // Best-effort: attempt to salvage baseline from corrupt state file
+                if let Some(salvaged) = try_salvage_baseline_from_corrupt_file(state_path) {
+                    has_salvageable_data = true;
+                    InterfaceController::restore_baseline(&salvaged).map_err(|err| {
+                        UmbraError::RecoveryUncertain(format!(
+                            "Force recovery salvaged baseline for interface {} from corrupt state file, but restoration failed: {err}. Runtime state and firewall preserved.",
+                            salvaged.name
+                        ))
+                    })?;
+                    actions.push(format!(
+                        "Best-effort restoration: salvaged baseline from corrupt state file and restored interface {} to original MAC {}",
+                        salvaged.name, salvaged.original_mac
+                    ));
+                    baseline_restoration_succeeded = true;
+                } else {
+                    actions.push(format!(
+                        "Warning: runtime state file was corrupt ({e}); baseline MAC could not be salvaged or restored. Please verify network manager or re-plug interface if MAC was changed."
+                    ));
+                }
+            }
+        }
+
+        // 2. Inspect and Reconcile Firewall
+        // Only reached if baseline restoration succeeded or no baseline could be salvaged
         let table_present =
             FirewallController::table_exists(&options.table_family, &options.table_name)?;
         if table_present {
@@ -274,6 +358,12 @@ impl RecoveryController {
             ) {
                 Ok(_) => {
                     FirewallController::teardown(&options.table_family, &options.table_name)?;
+                    if FirewallController::table_exists(&options.table_family, &options.table_name)?
+                    {
+                        return Err(UmbraError::FirewallTeardownFailed(
+                            "Firewall table remains active after teardown attempt".to_string(),
+                        ));
+                    }
                     actions.push(format!(
                         "Successfully authenticated ownership marker and removed firewall table {} {}",
                         options.table_family, options.table_name
@@ -293,63 +383,9 @@ impl RecoveryController {
             ));
         }
 
-        // 2. Best-effort interface / MAC restoration
-        let loaded_state = ActiveState::load_from_path(state_path);
-        match loaded_state {
-            Ok(Some(state)) => {
-                // State was readable despite force mode
-                if let Ok(orig_mac) = MacAddress::parse(&state.original_mac) {
-                    let baseline = InterfaceBaseline {
-                        name: state.interface.clone(),
-                        original_mac: orig_mac,
-                        was_up: state.interface_was_up,
-                    };
-                    InterfaceController::restore_baseline(&baseline).map_err(|e| {
-                        UmbraError::RecoveryUncertain(format!(
-                            "Force recovery failed to restore interface {}: {e}. Runtime state preserved.",
-                            state.interface
-                        ))
-                    })?;
-                    actions.push(format!(
-                        "Restored interface {} to original MAC {}",
-                        state.interface, state.original_mac
-                    ));
-                } else {
-                    actions.push(format!(
-                        "Warning: state file had unparseable MAC '{}'; hardware MAC not restored",
-                        state.original_mac
-                    ));
-                }
-            }
-            Ok(None) => {
-                actions.push(
-                    "Warning: runtime state file was absent; baseline MAC unknown, interface MAC not restored. Please verify network manager or re-plug interface if MAC was changed."
-                        .to_string(),
-                );
-            }
-            Err(e) => {
-                // Best-effort: attempt to salvage baseline from corrupt state file
-                if let Some(salvaged) = try_salvage_baseline_from_corrupt_file(state_path) {
-                    InterfaceController::restore_baseline(&salvaged).map_err(|err| {
-                        UmbraError::RecoveryUncertain(format!(
-                            "Force recovery salvaged baseline for interface {} from corrupt state file, but restoration failed: {err}. Runtime state preserved.",
-                            salvaged.name
-                        ))
-                    })?;
-                    actions.push(format!(
-                        "Best-effort restoration: salvaged baseline from corrupt state file and restored interface {} to original MAC {}",
-                        salvaged.name, salvaged.original_mac
-                    ));
-                } else {
-                    actions.push(format!(
-                        "Warning: runtime state file was corrupt ({e}); baseline MAC could not be salvaged or restored. Please verify network manager or re-plug interface if MAC was changed."
-                    ));
-                }
-            }
-        }
-
-        // 3. Remove corrupt or existing state file ONLY after successful restoration
-        if state_path.exists() {
+        // 3. Remove corrupt or existing state file ONLY after successful baseline restoration
+        // or if state had no salvageable data
+        if state_path.exists() && (baseline_restoration_succeeded || !has_salvageable_data) {
             let _ = ActiveState::remove_from_path(state_path);
             actions.push(format!(
                 "Cleaned runtime state file {}",

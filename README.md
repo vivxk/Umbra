@@ -92,7 +92,10 @@ Tor TransPort (127.0.0.1:9040)  Tor DNSPort (127.0.0.1:5353)         BLOCKED / D
 git clone https://github.com/umbra/umbra.git
 cd umbra
 
-# Build release binary and install to system
+# Build release binary as a normal user:
+make
+
+# Install release binary and system configuration as root:
 sudo make install
 
 # Packagers can specify custom staging destination and prefix:
@@ -100,9 +103,9 @@ sudo make install
 ```
 
 The installer performs the following actions:
-1. Compiles the optimized release binary (`cargo build --release`).
+1. Uses the compiled release binary (built via `make`).
 2. Installs the executable to `/usr/bin/umbra` with permissions `0755` (and symlinks `/usr/local/bin/umbra`).
-3. Installs the Tor configuration fragment to `/etc/tor/torrc.d/umbra.conf` (authenticated with `# umbra-managed`). Refuses symlinks and unmanaged file overwrites. Writes atomically.
+3. Installs the Tor configuration fragment to `/etc/tor/torrc.d/umbra.conf` (authenticated with `# umbra-managed`). Refuses symlinks, insecure directories, and unmanaged or modified file overwrites. Writes atomically.
 4. Installs the systemd unit template to `/etc/systemd/system/umbra-boot.service`.
 
 ### 2. Verify Tor Configuration

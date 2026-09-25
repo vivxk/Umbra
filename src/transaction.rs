@@ -22,6 +22,7 @@ pub struct StartupTransactionOptions {
     pub transport_port: u16,
     pub dns_port: u16,
     pub state_file_override: Option<String>,
+    pub lock_file_override: Option<String>,
 }
 
 impl Default for StartupTransactionOptions {
@@ -31,6 +32,20 @@ impl Default for StartupTransactionOptions {
             transport_port: DEFAULT_TOR_TRANSPORT,
             dns_port: DEFAULT_TOR_DNSPORT,
             state_file_override: None,
+            lock_file_override: None,
+        }
+    }
+}
+
+impl StartupTransactionOptions {
+    pub fn resolved_lock_path(&self) -> std::path::PathBuf {
+        if let Some(ref lock_path) = self.lock_file_override {
+            std::path::PathBuf::from(lock_path)
+        } else if let Some(ref state_path) = self.state_file_override {
+            let p = std::path::Path::new(state_path);
+            p.with_extension("lock")
+        } else {
+            std::path::PathBuf::from(crate::constants::LOCK_FILE)
         }
     }
 }
@@ -53,6 +68,9 @@ pub struct StartupTransaction;
 impl StartupTransaction {
     /// Executes the full atomic startup transaction per Sections 30 & 31
     pub fn execute(options: StartupTransactionOptions) -> Result<StartupTransactionResult> {
+        let lock_path = options.resolved_lock_path();
+        let _lock = crate::system::ProcessLock::acquire_path(&lock_path)?;
+
         let state_path = options
             .state_file_override
             .as_deref()
@@ -184,7 +202,7 @@ impl StartupTransaction {
     }
 
     /// Executes safe rollback without ever opening direct internet fallback
-    fn rollback(
+    pub fn rollback(
         baseline: &InterfaceBaseline,
         fw_config: &FirewallConfig,
         mac_randomized: bool,
@@ -194,21 +212,21 @@ impl StartupTransaction {
     ) -> Result<()> {
         let mut rollback_errors = Vec::new();
 
-        // 1. Teardown firewall if installed
-        if firewall_installed {
+        // 1. Revert MAC FIRST if randomized, keeping fail-closed firewall active
+        if mac_randomized {
+            if let Err(e) = InterfaceController::restore_baseline(baseline) {
+                rollback_errors.push(format!("failed to restore baseline MAC: {e}"));
+            }
+        }
+
+        // 2. Teardown firewall ONLY if MAC restoration succeeded (or MAC was never randomized)
+        if firewall_installed && rollback_errors.is_empty() {
             if let Err(e) = FirewallController::teardown_with_id(
                 &fw_config.table_family,
                 &fw_config.table_name,
                 Some(&fw_config.activation_id),
             ) {
                 rollback_errors.push(format!("failed to teardown firewall: {e}"));
-            }
-        }
-
-        // 2. Revert MAC if randomized
-        if mac_randomized {
-            if let Err(e) = InterfaceController::restore_baseline(baseline) {
-                rollback_errors.push(format!("failed to restore baseline MAC: {e}"));
             }
         }
 

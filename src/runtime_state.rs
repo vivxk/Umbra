@@ -130,7 +130,10 @@ impl ActiveState {
             )));
         }
         match self.status {
-            UmbraStatus::Starting | UmbraStatus::Active => {}
+            UmbraStatus::Starting
+            | UmbraStatus::Active
+            | UmbraStatus::Stopping
+            | UmbraStatus::RecoveryRequired => {}
             _ => {
                 return Err(UmbraError::RuntimeStateCorrupt(format!(
                     "invalid lifecycle status in active state: {}",

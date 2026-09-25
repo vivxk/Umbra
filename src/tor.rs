@@ -230,16 +230,9 @@ pub fn parse_proc_net_sockets(content: &str) -> Vec<SocketEntry> {
 
 /// Finds matching socket entry in a proc net file (e.g. `/proc/net/tcp` or `/proc/net/udp`)
 pub fn find_socket_in_proc_net(proc_net_file: &Path, port: u16) -> Result<Option<SocketEntry>> {
-    let content = match fs::read_to_string(proc_net_file) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(UmbraError::TorInspectionError(format!(
-                "failed to read {}: {e}",
-                proc_net_file.display()
-            )));
-        }
-    };
+    let content = fs::read_to_string(proc_net_file).map_err(|e| {
+        UmbraError::TorInspectionError(format!("failed to read {}: {e}", proc_net_file.display()))
+    })?;
 
     let is_udp = proc_net_file
         .file_name()
@@ -269,16 +262,12 @@ pub fn find_socket_inode_owner(
     proc_dir: &Path,
     target_inode: u64,
 ) -> Result<Option<(u32, String)>> {
-    let entries = match fs::read_dir(proc_dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(UmbraError::TorInspectionError(format!(
-                "failed to read proc directory {}: {e}",
-                proc_dir.display()
-            )));
-        }
-    };
+    let entries = fs::read_dir(proc_dir).map_err(|e| {
+        UmbraError::TorInspectionError(format!(
+            "failed to read proc directory {}: {e}",
+            proc_dir.display()
+        ))
+    })?;
 
     let target_socket_str = format!("socket:[{target_inode}]");
 

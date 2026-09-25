@@ -38,7 +38,6 @@ fn run_app(cli: Cli) -> Result<()> {
 
 fn handle_start(interface_override: Option<String>) -> Result<()> {
     require_root("start")?;
-    let _lock = ProcessLock::acquire()?;
 
     println!("[*] Initializing Umbra privacy boundary...");
 
@@ -47,6 +46,7 @@ fn handle_start(interface_override: Option<String>) -> Result<()> {
         transport_port: DEFAULT_TOR_TRANSPORT,
         dns_port: DEFAULT_TOR_DNSPORT,
         state_file_override: None,
+        lock_file_override: None,
     };
 
     let result = StartupTransaction::execute(options)?;

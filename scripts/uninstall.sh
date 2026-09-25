@@ -85,27 +85,42 @@ fi
 echo "[✓] Verified Umbra is INACTIVE. Proceeding with uninstallation."
 
 # 1. Disable and remove systemd boot service if present
-if [ -z "$DESTDIR" ] && command -v systemctl >/dev/null 2>&1; then
-    if systemctl is-enabled umbra-boot.service >/dev/null 2>&1; then
-        echo "[*] Disabling systemd service umbra-boot.service..."
-        if ! systemctl disable umbra-boot.service; then
-            echo "[!] Error: Failed to disable umbra-boot.service. Aborting uninstall."
-            exit 1
-        fi
-    fi
+if { [ -z "$DESTDIR" ] || [ -n "${FORCE_SYSTEMD_CHECK:-}" ]; } && command -v systemctl >/dev/null 2>&1; then
     if systemctl is-active umbra-boot.service >/dev/null 2>&1; then
         echo "[*] Stopping systemd service umbra-boot.service..."
         if ! systemctl stop umbra-boot.service; then
             echo "[!] Error: Failed to stop active umbra-boot.service. Aborting uninstall."
             exit 1
         fi
+        if systemctl is-active umbra-boot.service >/dev/null 2>&1; then
+            echo "[!] Error: umbra-boot.service remains active after stop. Aborting uninstall."
+            exit 1
+        fi
+        echo "[✓] Verified umbra-boot.service is inactive."
+    fi
+
+    if systemctl is-enabled umbra-boot.service >/dev/null 2>&1; then
+        echo "[*] Disabling systemd service umbra-boot.service..."
+        if ! systemctl disable umbra-boot.service; then
+            echo "[!] Error: Failed to disable umbra-boot.service. Aborting uninstall."
+            exit 1
+        fi
+        if systemctl is-enabled umbra-boot.service >/dev/null 2>&1; then
+            echo "[!] Error: umbra-boot.service remains enabled after disable. Aborting uninstall."
+            exit 1
+        fi
+        echo "[✓] Verified umbra-boot.service is disabled."
     fi
 fi
 
-if [ -f "$SYSTEMD_DIR/umbra-boot.service" ]; then
+if [ -f "$SYSTEMD_DIR/umbra-boot.service" ] || [ -L "$SYSTEMD_DIR/umbra-boot.service" ]; then
     rm -f "$SYSTEMD_DIR/umbra-boot.service"
+    if [ -e "$SYSTEMD_DIR/umbra-boot.service" ]; then
+        echo "[!] Error: Failed to remove $SYSTEMD_DIR/umbra-boot.service. Aborting uninstall."
+        exit 1
+    fi
     if [ -z "$DESTDIR" ] && command -v systemctl >/dev/null 2>&1; then
-        systemctl daemon-reload 2>/dev/null || true
+        systemctl daemon-reload
     fi
     echo "[✓] Removed $SYSTEMD_DIR/umbra-boot.service"
 fi
@@ -138,13 +153,17 @@ if [ -L "$LOCAL_BIN_DIR/umbra" ] || [ -f "$LOCAL_BIN_DIR/umbra" ]; then
     echo "[✓] Removed $LOCAL_BIN_DIR/umbra"
 fi
 
-# 4. Clean runtime directory safely file by file (Section 22)
+# 4. Clean runtime directory safely file by file (explicit Umbra-owned files only)
 clean_run_dir() {
     local dir="$1"
-    if [ -d "$dir" ] && [ ! -L "$dir" ]; then
-        for f in "$dir"/*; do
-            if [ -f "$f" ] || [ -L "$f" ]; then
-                rm -f "$f"
+    if [ -L "$dir" ]; then
+        echo "[!] Warning: $dir is a symbolic link. Refusing to remove."
+        return 0
+    fi
+    if [ -d "$dir" ]; then
+        for known_file in "active.json" "active.tmp" "active.lock" "state.json" "umbra.lock"; do
+            if [ -f "$dir/$known_file" ] || [ -L "$dir/$known_file" ]; then
+                rm -f "$dir/$known_file"
             fi
         done
         rmdir "$dir" 2>/dev/null || true

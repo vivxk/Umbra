@@ -335,3 +335,100 @@ fn test_mac_mismatch_prevents_active_status_in_netns() {
     )
     .expect("teardown");
 }
+
+#[test]
+fn test_missing_dns_or_tcp_redirect_fails_live_verification_in_netns() {
+    if !is_in_isolated_netns() {
+        let netns = match IsolatedNetns::new("hd_vfy_rules") {
+            Some(ns) => ns,
+            None => return,
+        };
+        netns.run_test("test_missing_dns_or_tcp_redirect_fails_live_verification_in_netns");
+        return;
+    }
+
+    let dev_name = "dum_hd_vfy";
+    let _ = Command::new("ip")
+        .args(["link", "add", dev_name, "type", "dummy"])
+        .status();
+
+    let fw_config = get_test_fw_config(dev_name, "act_vfy_test");
+    let full_ruleset = FirewallController::generate_ruleset(&fw_config);
+
+    // 1. Missing DNS redirect: remove DNS redirect rule from ruleset
+    let missing_dns_ruleset = full_ruleset.replace(
+        &format!("udp dport 53 redirect to :{}", fw_config.tor_dns_port),
+        "",
+    );
+    let mut child = Command::new("nft")
+        .args(["-f", "-"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn nft");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(missing_dns_ruleset.as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+
+    // verify_live MUST fail when DNS redirect rule is missing
+    let vfy_res = FirewallController::verify_live(&fw_config);
+    assert!(
+        vfy_res.is_err(),
+        "verify_live must fail when DNS redirect rule is missing"
+    );
+    match vfy_res.unwrap_err() {
+        UmbraError::FirewallVerificationFailed(msg) => {
+            assert!(msg.contains("missing dns redirection rule"));
+        }
+        other => panic!("expected FirewallVerificationFailed, got {other:?}"),
+    }
+
+    FirewallController::teardown_with_id(
+        &fw_config.table_family,
+        &fw_config.table_name,
+        Some(&fw_config.activation_id),
+    )
+    .unwrap();
+
+    // 2. Missing TransPort redirect: remove TransPort redirect rule from ruleset
+    let missing_transport_ruleset = full_ruleset.replace(
+        &format!("redirect to :{}", fw_config.tor_transport_port),
+        "",
+    );
+    let mut child2 = Command::new("nft")
+        .args(["-f", "-"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn nft");
+    child2
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(missing_transport_ruleset.as_bytes())
+        .unwrap();
+    assert!(child2.wait().unwrap().success());
+
+    // verify_live MUST fail when TransPort redirect rule is missing
+    let vfy_res2 = FirewallController::verify_live(&fw_config);
+    assert!(
+        vfy_res2.is_err(),
+        "verify_live must fail when TransPort redirect rule is missing"
+    );
+    match vfy_res2.unwrap_err() {
+        UmbraError::FirewallVerificationFailed(msg) => {
+            assert!(msg.contains("missing transport redirection rule"));
+        }
+        other => panic!("expected FirewallVerificationFailed, got {other:?}"),
+    }
+
+    FirewallController::teardown_with_id(
+        &fw_config.table_family,
+        &fw_config.table_name,
+        Some(&fw_config.activation_id),
+    )
+    .unwrap();
+    let _ = Command::new("ip").args(["link", "del", dev_name]).status();
+}

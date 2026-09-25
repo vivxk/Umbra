@@ -33,6 +33,16 @@ if [ ! -f "$RELEASE_BIN" ]; then
     if [ -n "$DESTDIR" ] && [ -f "$REPO_ROOT/target/debug/umbra" ]; then
         RELEASE_BIN="$REPO_ROOT/target/debug/umbra"
     else
+        # FIX #10: Root must never compile cargo build artifacts directly
+        if [ "$(id -u)" -eq 0 ] && [ -z "${SUDO_USER:-}" ]; then
+            echo "[!] Error: Release binary not found at $RELEASE_BIN. Building cargo artifacts as root is not permitted."
+            echo "    Please build the binary as a normal user first:"
+            echo "        make"
+            echo "    Then run installation as root:"
+            echo "        sudo make install"
+            exit 1
+        fi
+
         echo "[*] Release binary not found at $RELEASE_BIN. Attempting build with cargo..."
         CARGO_BIN="$(command -v cargo || true)"
         if [ -z "$CARGO_BIN" ] && [ -n "${SUDO_USER:-}" ]; then
@@ -44,7 +54,7 @@ if [ ! -f "$RELEASE_BIN" ]; then
 
         if [ -z "$CARGO_BIN" ]; then
             echo "[!] Error: 'cargo' binary not found. Please compile the release binary first:"
-            echo "    cargo build --release"
+            echo "    make (or cargo build --release)"
             exit 1
         fi
 
@@ -64,11 +74,29 @@ fi
 
 # 2. Install binary to $BIN_DIR/umbra and symlink $LOCAL_BIN_DIR/umbra
 echo "[*] Installing binary to $BIN_DIR/umbra..."
-if [ -f "$BIN_DIR/umbra" ]; then
-    if ! "$BIN_DIR/umbra" version >/dev/null 2>&1 && ! strings "$BIN_DIR/umbra" 2>/dev/null | grep -q "table inet umbra"; then
+if [ -e "$BIN_DIR/umbra" ] || [ -L "$BIN_DIR/umbra" ]; then
+    if [ -L "$BIN_DIR/umbra" ]; then
+        echo "[!] Error: Existing file at $BIN_DIR/umbra is a symbolic link."
+        echo "    Refusing to overwrite symlink to prevent configuration tampering."
+        exit 1
+    fi
+    if [ ! -f "$BIN_DIR/umbra" ]; then
+        echo "[!] Error: Existing object at $BIN_DIR/umbra is not a regular file."
+        echo "    Refusing to overwrite non-regular file."
+        exit 1
+    fi
+    if ! "$BIN_DIR/umbra" version 2>/dev/null | grep -qi "umbra" && ! strings "$BIN_DIR/umbra" 2>/dev/null | grep -q "table inet umbra"; then
         echo "[!] Error: Existing file at $BIN_DIR/umbra does not appear to be an Umbra binary."
         echo "    Refusing to overwrite unverified binary to prevent destroying unrelated files."
         exit 1
+    fi
+    if [ -z "$DESTDIR" ]; then
+        BIN_OWNER="$(stat -c '%u' "$BIN_DIR/umbra" 2>/dev/null || stat -f '%u' "$BIN_DIR/umbra" 2>/dev/null || true)"
+        if [ -n "$BIN_OWNER" ] && [ "$BIN_OWNER" -ne 0 ]; then
+            echo "[!] Error: Existing file at $BIN_DIR/umbra is not owned by root (UID 0)."
+            echo "    Refusing to overwrite non-root binary."
+            exit 1
+        fi
     fi
 fi
 mkdir -p "$BIN_DIR"
@@ -81,6 +109,12 @@ if [ "$BIN_DIR" != "$LOCAL_BIN_DIR" ] && [ "$(realpath "$BIN_DIR" 2>/dev/null ||
             echo "    Refusing to overwrite regular file to prevent destroying unrelated files."
             exit 1
         fi
+        LINK_TARGET="$(readlink "$LOCAL_BIN_DIR/umbra" || true)"
+        if [ "$LINK_TARGET" != "$PREFIX/bin/umbra" ] && [ "$LINK_TARGET" != "/usr/bin/umbra" ] && [ "$LINK_TARGET" != "umbra" ]; then
+            echo "[!] Error: Existing symlink at $LOCAL_BIN_DIR/umbra points to '$LINK_TARGET' (expected '$PREFIX/bin/umbra')."
+            echo "    Refusing to overwrite unexpected symlink."
+            exit 1
+        fi
     fi
     mkdir -p "$LOCAL_BIN_DIR"
     ln -sf "$PREFIX/bin/umbra" "$LOCAL_BIN_DIR/umbra"
@@ -88,7 +122,7 @@ if [ "$BIN_DIR" != "$LOCAL_BIN_DIR" ] && [ "$(realpath "$BIN_DIR" 2>/dev/null ||
 fi
 echo "[✓] Binary installed: $BIN_DIR/umbra"
 
-# 3. Install Tor configuration fragment with verified ownership and symlink refusal
+# 3. Install Tor configuration fragment with verified ownership and directory security
 if [ -e "$TORRC_DIR" ]; then
     if [ -L "$TORRC_DIR" ]; then
         echo "[!] Error: $TORRC_DIR is a symbolic link. Refusing to install."
@@ -98,6 +132,14 @@ if [ -e "$TORRC_DIR" ]; then
         echo "[!] Error: $TORRC_DIR is not a directory. Refusing to install."
         exit 1
     fi
+    if [ -z "$DESTDIR" ]; then
+        DIR_OWNER="$(stat -c '%u' "$TORRC_DIR" 2>/dev/null || stat -f '%u' "$TORRC_DIR" 2>/dev/null || true)"
+        if [ -n "$DIR_OWNER" ] && [ "$DIR_OWNER" -ne 0 ]; then
+            echo "[!] Error: $TORRC_DIR is not owned by root (UID 0)."
+            echo "    Refusing to install into non-root directory."
+            exit 1
+        fi
+    fi
     PERMS="$(stat -c '%a' "$TORRC_DIR" 2>/dev/null || stat -f '%Lp' "$TORRC_DIR" 2>/dev/null || true)"
     if [ -n "$PERMS" ]; then
         if echo "$PERMS" | grep -q -E "[2367].$|.[2367]$"; then
@@ -106,10 +148,10 @@ if [ -e "$TORRC_DIR" ]; then
             exit 1
         fi
     fi
+else
+    mkdir -p "$TORRC_DIR"
+    chmod 0755 "$TORRC_DIR"
 fi
-
-mkdir -p "$TORRC_DIR"
-chmod 0755 "$TORRC_DIR"
 
 if [ -L "$TOR_FRAGMENT" ]; then
     echo "[!] Error: Existing file at $TOR_FRAGMENT is a symbolic link."
@@ -117,10 +159,26 @@ if [ -L "$TOR_FRAGMENT" ]; then
     exit 1
 fi
 
-if [ -f "$TOR_FRAGMENT" ]; then
+if [ -e "$TOR_FRAGMENT" ]; then
+    if [ ! -f "$TOR_FRAGMENT" ]; then
+        echo "[!] Error: Existing object at $TOR_FRAGMENT is not a regular file. Refusing to overwrite."
+        exit 1
+    fi
     if ! grep -q "# umbra-managed" "$TOR_FRAGMENT"; then
         echo "[!] Error: Existing file at $TOR_FRAGMENT is not managed by Umbra (missing '# umbra-managed' marker)."
         echo "    Refusing to overwrite unmanaged file to prevent configuration corruption."
+        exit 1
+    fi
+    if [ -z "$DESTDIR" ]; then
+        FRAG_OWNER="$(stat -c '%u' "$TOR_FRAGMENT" 2>/dev/null || stat -f '%u' "$TOR_FRAGMENT" 2>/dev/null || true)"
+        if [ -n "$FRAG_OWNER" ] && [ "$FRAG_OWNER" -ne 0 ]; then
+            echo "[!] Error: Existing fragment at $TOR_FRAGMENT is not owned by root (UID 0). Refusing to overwrite."
+            exit 1
+        fi
+    fi
+    if ! grep -q "TransPort 127.0.0.1:9040" "$TOR_FRAGMENT" || ! grep -q "DNSPort 127.0.0.1:5353" "$TOR_FRAGMENT"; then
+        echo "[!] Error: Existing fragment at $TOR_FRAGMENT contains '# umbra-managed' but has been modified by the administrator."
+        echo "    Refusing to silently overwrite modified configuration file."
         exit 1
     fi
     echo "[*] Updating existing Umbra-managed fragment at $TOR_FRAGMENT..."
@@ -151,11 +209,29 @@ fi
 # 4. Install systemd boot service unit template if systemd is present
 SERVICE_SRC="$REPO_ROOT/systemd/umbra-boot.service"
 if [ -f "$SERVICE_SRC" ]; then
-    if [ -f "$SYSTEMD_DIR/umbra-boot.service" ]; then
+    if [ -e "$SYSTEMD_DIR/umbra-boot.service" ] || [ -L "$SYSTEMD_DIR/umbra-boot.service" ]; then
+        if [ -L "$SYSTEMD_DIR/umbra-boot.service" ]; then
+            echo "[!] Error: Existing file at $SYSTEMD_DIR/umbra-boot.service is a symbolic link."
+            echo "    Refusing to overwrite symlink."
+            exit 1
+        fi
+        if [ ! -f "$SYSTEMD_DIR/umbra-boot.service" ]; then
+            echo "[!] Error: Existing object at $SYSTEMD_DIR/umbra-boot.service is not a regular file."
+            echo "    Refusing to overwrite non-regular file."
+            exit 1
+        fi
         if ! grep -q "umbra" "$SYSTEMD_DIR/umbra-boot.service"; then
             echo "[!] Error: Existing file at $SYSTEMD_DIR/umbra-boot.service is not an Umbra unit."
             echo "    Refusing to overwrite unmanaged service file."
             exit 1
+        fi
+        if [ -z "$DESTDIR" ]; then
+            UNIT_OWNER="$(stat -c '%u' "$SYSTEMD_DIR/umbra-boot.service" 2>/dev/null || stat -f '%u' "$SYSTEMD_DIR/umbra-boot.service" 2>/dev/null || true)"
+            if [ -n "$UNIT_OWNER" ] && [ "$UNIT_OWNER" -ne 0 ]; then
+                echo "[!] Error: Existing file at $SYSTEMD_DIR/umbra-boot.service is not owned by root (UID 0)."
+                echo "    Refusing to overwrite non-root service file."
+                exit 1
+            fi
         fi
     fi
     mkdir -p "$SYSTEMD_DIR"
