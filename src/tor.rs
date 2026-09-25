@@ -921,13 +921,21 @@ impl TorController {
         port: u16,
         expected: Option<&TorIdentity>,
     ) -> Result<()> {
+        verify_socket_ownership(
+            &proc_dir.join("net/udp"),
+            proc_dir,
+            port,
+            expected.map(|i| i.uid),
+            expected.map(|i| i.pid),
+        )?;
+
         let target_addr = format!("{LOCAL_LOOPBACK_IPV4}:{port}");
         let socket = UdpSocket::bind("127.0.0.1:0").map_err(|e| {
             UmbraError::DnsProtectionFailed(format!("failed to bind test UDP socket: {e}"))
         })?;
 
         socket
-            .set_read_timeout(Some(Duration::from_millis(500)))
+            .set_read_timeout(Some(Duration::from_millis(1500)))
             .map_err(|e| {
                 UmbraError::DnsProtectionFailed(format!("failed to set socket timeout: {e}"))
             })?;
@@ -942,16 +950,18 @@ impl TorController {
 
         let _ = socket.connect(parsed_target);
 
+        // Query 1.0.0.127.in-addr.arpa (PTR) which Tor resolves immediately locally without requiring exit node circuits
         let query_packet = [
             0x12, 0x34, // ID
-            0x01, 0x00, // Standard query
+            0x01, 0x00, // Standard query (RD=1)
             0x00, 0x01, // QDCOUNT = 1
             0x00, 0x00, // ANCOUNT = 0
             0x00, 0x00, // NSCOUNT = 0
             0x00, 0x00, // ARCOUNT = 0
-            0x09, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't', 0x00, // Name
-            0x00, 0x01, // Type A
-            0x00, 0x01, // Class IN
+            0x01, b'1', 0x01, b'0', 0x01, b'0', 0x03, b'1', b'2', b'7', 0x07, b'i', b'n', b'-',
+            b'a', b'd', b'd', b'r', 0x04, b'a', b'r', b'p', b'a', 0x00, // End of name
+            0x00, 0x0C, // Type PTR (12)
+            0x00, 0x01, // Class IN (1)
         ];
 
         if let Err(e) = socket.send(&query_packet) {
@@ -977,13 +987,6 @@ impl TorController {
                         actual: format!("mismatched transaction ID: {:02x}{:02x}", buf[0], buf[1]),
                     });
                 }
-                verify_socket_ownership(
-                    &proc_dir.join("net/udp"),
-                    proc_dir,
-                    port,
-                    expected.map(|i| i.uid),
-                    expected.map(|i| i.pid),
-                )?;
                 Ok(())
             }
             Ok(_) => Err(UmbraError::TorListenerWrongProcess {

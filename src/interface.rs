@@ -302,11 +302,46 @@ impl InterfaceController {
         Ok(())
     }
 
+    /// Captures active routing table entries associated with a specific interface
+    pub fn capture_interface_routes(iface: &str) -> Result<Vec<String>> {
+        let output = crate::system::resolve_trusted_command("ip")?
+            .args(["route", "show", "dev", iface])
+            .output()
+            .map_err(UmbraError::Io)?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut routes = Vec::new();
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                routes.push(trimmed.to_string());
+            }
+        }
+        Ok(routes)
+    }
+
+    /// Restores captured routing table entries on a specific interface
+    pub fn restore_interface_routes(iface: &str, routes: &[String]) {
+        for route_str in routes {
+            let mut args: Vec<&str> = vec!["route", "replace"];
+            let tokens: Vec<&str> = route_str.split_whitespace().collect();
+            if tokens.contains(&"dev") {
+                args.extend(tokens);
+            } else {
+                args.extend(tokens);
+                args.push("dev");
+                args.push(iface);
+            }
+            if let Ok(mut cmd) = crate::system::resolve_trusted_command("ip") {
+                let _ = cmd.args(&args).output();
+            }
+        }
+    }
+
     /// Changes the interface MAC address with verification:
     /// 1. Rejects loopback 'lo' and non-randomized MACs
-    /// 2. Brings interface down if up
+    /// 2. Captures routes and brings interface down if up
     /// 3. Sets new MAC
-    /// 4. Restores original administrative state
+    /// 4. Restores original administrative state and routes
     /// 5. Verifies live MAC and admin state match
     pub fn apply_mac(iface: &str, new_mac: MacAddress) -> Result<()> {
         if iface == "lo" {
@@ -322,6 +357,7 @@ impl InterfaceController {
             )));
         }
 
+        let captured_routes = Self::capture_interface_routes(iface).unwrap_or_default();
         let was_up = Self::is_administratively_up(iface)?;
 
         if was_up {
@@ -359,6 +395,10 @@ impl InterfaceController {
 
         admin_restore_res?;
 
+        if was_up && !captured_routes.is_empty() {
+            Self::restore_interface_routes(iface, &captured_routes);
+        }
+
         // Live verification of MAC
         let live_mac = Self::read_mac(iface)?;
         if live_mac != new_mac {
@@ -392,6 +432,7 @@ impl InterfaceController {
             });
         }
 
+        let captured_routes = Self::capture_interface_routes(&baseline.name).unwrap_or_default();
         let was_up = Self::is_administratively_up(&baseline.name)?;
 
         if was_up {
@@ -431,6 +472,10 @@ impl InterfaceController {
         }
 
         admin_restore_res?;
+
+        if baseline.was_up && !captured_routes.is_empty() {
+            Self::restore_interface_routes(&baseline.name, &captured_routes);
+        }
 
         // Live verification of MAC
         let live_mac = Self::read_mac(&baseline.name)?;

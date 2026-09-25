@@ -282,9 +282,7 @@ impl LiveVerifier {
         let status = if corrupt_state_err.is_some() {
             UmbraStatus::RecoveryRequired
         } else if let Some(ref state) = active_state {
-            if state.status == UmbraStatus::Starting {
-                UmbraStatus::Starting
-            } else if state.status == UmbraStatus::RecoveryRequired {
+            if state.status == UmbraStatus::RecoveryRequired {
                 UmbraStatus::RecoveryRequired
             } else if inspection_error {
                 UmbraStatus::Unknown
@@ -296,6 +294,8 @@ impl LiveVerifier {
                 } else {
                     UmbraStatus::RecoveryRequired
                 }
+            } else if state.status == UmbraStatus::Starting {
+                UmbraStatus::Starting
             } else {
                 UmbraStatus::RecoveryRequired
             }

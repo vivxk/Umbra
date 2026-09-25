@@ -23,6 +23,7 @@ pub struct StartupTransactionOptions {
     pub dns_port: u16,
     pub state_file_override: Option<String>,
     pub lock_file_override: Option<String>,
+    pub no_mac_randomize: bool,
 }
 
 impl Default for StartupTransactionOptions {
@@ -33,6 +34,7 @@ impl Default for StartupTransactionOptions {
             dns_port: DEFAULT_TOR_DNSPORT,
             state_file_override: None,
             lock_file_override: None,
+            no_mac_randomize: false,
         }
     }
 }
@@ -130,8 +132,12 @@ impl StartupTransaction {
             ..Default::default()
         };
 
-        // 6. Generate Randomized MAC
-        let random_mac = MacAddress::generate_random()?;
+        // 6. Generate or Preserve MAC
+        let random_mac = if options.no_mac_randomize {
+            baseline.original_mac
+        } else {
+            MacAddress::generate_random()?
+        };
         let mut mac_randomized = false;
         let mut firewall_installed = false;
 
@@ -156,12 +162,18 @@ impl StartupTransaction {
             FirewallController::install(&fw_config)?;
             firewall_installed = true;
 
-            // Apply randomized MAC
-            InterfaceController::apply_mac(&iface, random_mac)?;
-            mac_randomized = true;
+            // Apply randomized MAC if enabled
+            if !options.no_mac_randomize {
+                InterfaceController::apply_mac(&iface, random_mac)?;
+                mac_randomized = true;
+            }
 
             // Post-activation live verification gate (Sections 32, 45, 77)
-            let report = LiveVerifier::verify_current_state()?;
+            let verify_opts = crate::verify::VerifyOptions {
+                state_file_override: options.state_file_override.clone(),
+                ..Default::default()
+            };
+            let report = LiveVerifier::verify_with_options(&verify_opts)?;
             if report.status != UmbraStatus::Active {
                 return Err(UmbraError::FirewallVerificationFailed(format!(
                     "post-activation verification failed (status: {}): {:?}",

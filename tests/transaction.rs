@@ -11,6 +11,26 @@ fn test_startup_options_defaults() {
     assert_eq!(opts.transport_port, DEFAULT_TOR_TRANSPORT);
     assert_eq!(opts.dns_port, DEFAULT_TOR_DNSPORT);
     assert!(opts.state_file_override.is_none());
+    assert!(!opts.no_mac_randomize);
+}
+
+#[test]
+fn test_cli_parse_start_no_mac_randomize() {
+    use clap::Parser;
+    use umbra::cli::{Cli, Commands};
+
+    let cli = Cli::try_parse_from(["umbra", "start", "--no-mac-randomize"])
+        .expect("parse start with no-mac-randomize");
+    match cli.command {
+        Commands::Start {
+            interface,
+            no_mac_randomize,
+        } => {
+            assert!(interface.is_none());
+            assert!(no_mac_randomize);
+        }
+        other => panic!("expected Start command, got {other:?}"),
+    }
 }
 
 #[test]

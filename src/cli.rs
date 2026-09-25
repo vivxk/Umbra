@@ -19,6 +19,10 @@ pub enum Commands {
         /// Optional manual egress interface override
         #[arg(short, long)]
         interface: Option<String>,
+
+        /// Preserve original MAC address (required in WSL2, Hyper-V, and cloud VMs with MAC anti-spoofing)
+        #[arg(long)]
+        no_mac_randomize: bool,
     },
 
     /// Stop Umbra and restore original baseline network configuration

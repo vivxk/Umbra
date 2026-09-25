@@ -23,7 +23,10 @@ fn main() {
 
 fn run_app(cli: Cli) -> Result<()> {
     match cli.command {
-        Commands::Start { interface } => handle_start(interface),
+        Commands::Start {
+            interface,
+            no_mac_randomize,
+        } => handle_start(interface, no_mac_randomize),
         Commands::Stop => handle_stop(),
         Commands::Status => handle_status(),
         Commands::Recover { normal: _, force } => handle_recover(force),
@@ -36,7 +39,7 @@ fn run_app(cli: Cli) -> Result<()> {
     }
 }
 
-fn handle_start(interface_override: Option<String>) -> Result<()> {
+fn handle_start(interface_override: Option<String>, no_mac_randomize: bool) -> Result<()> {
     require_root("start")?;
 
     println!("[*] Initializing Umbra privacy boundary...");
@@ -47,13 +50,18 @@ fn handle_start(interface_override: Option<String>) -> Result<()> {
         dns_port: DEFAULT_TOR_DNSPORT,
         state_file_override: None,
         lock_file_override: None,
+        no_mac_randomize,
     };
 
     let result = StartupTransaction::execute(options)?;
 
     println!("\n[✓] Umbra is ACTIVE");
     println!("    Interface:       {}", result.interface);
-    println!("    Randomized MAC:  {}", result.randomized_mac);
+    if no_mac_randomize {
+        println!("    MAC Address:     {} (preserved)", result.original_mac);
+    } else {
+        println!("    Randomized MAC:  {}", result.randomized_mac);
+    }
     println!("    Firewall:        Enforced (table inet umbra)");
     println!(
         "    Tor Routing:     Enforced (TransPort {})",
