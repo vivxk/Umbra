@@ -1,7 +1,7 @@
 # umbra-managed: systemd boot service for Umbra privacy boundary
 [Unit]
 Description=Umbra Privacy Network Boundary Boot Service
-Documentation=https://github.com/umbra/umbra
+Documentation=https://github.com/vivxk/Umbra
 After=network.target tor.service
 Wants=tor.service
 Before=network-online.target

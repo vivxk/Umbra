@@ -33,7 +33,7 @@ if [ ! -f "$RELEASE_BIN" ]; then
     if [ -n "$DESTDIR" ] && [ -f "$REPO_ROOT/target/debug/umbra" ]; then
         RELEASE_BIN="$REPO_ROOT/target/debug/umbra"
     else
-        # FIX #10: Root must never compile cargo build artifacts directly
+        # Root must never compile cargo build artifacts directly
         if [ "$(id -u)" -eq 0 ] && [ -z "${SUDO_USER:-}" ]; then
             echo "[!] Error: Release binary not found at $RELEASE_BIN. Building cargo artifacts as root is not permitted."
             echo "    Please build the binary as a normal user first:"
