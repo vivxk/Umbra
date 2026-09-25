@@ -67,7 +67,7 @@ pub struct StartupTransactionResult {
 pub struct StartupTransaction;
 
 impl StartupTransaction {
-    /// Executes the full atomic startup transaction per Sections 30 & 31
+    /// Executes the full atomic startup transaction, establishing fail-closed routing and verifying the boundary
     pub fn execute(options: StartupTransactionOptions) -> Result<StartupTransactionResult> {
         let lock_path = options.resolved_lock_path();
         let _lock = crate::system::ProcessLock::acquire_path(&lock_path)?;
@@ -78,7 +78,7 @@ impl StartupTransaction {
             .map(Path::new)
             .unwrap_or_else(|| Path::new(RUNTIME_STATE_FILE));
 
-        // 1. Guard against double-start / active session collision (Sections 26 & 48)
+        // 1. Guard against double-start or active session collision
         if let Some(existing) = ActiveState::load_from_path(state_path)? {
             return Err(UmbraError::AlreadyActive {
                 interface: existing.interface,
@@ -108,11 +108,10 @@ impl StartupTransaction {
             None => InterfaceController::detect_default_egress()?,
         };
 
-        // 4. Capture Interface Baseline (Sections 26 & 28)
+        // 4. Capture Interface Baseline (original MAC and link state)
         let baseline = InterfaceController::capture_baseline(&iface)?;
 
-        // 5. Generate and Apply Randomized MAC (Sections 24 & 25)
-        // 5. Generate Activation ID and Firefall Configuration
+        // 5. Generate unique activation ID and firewall configuration
         let activation_id = format!(
             "{:x}",
             SystemTime::now()
@@ -165,7 +164,7 @@ impl StartupTransaction {
                 mac_randomized = true;
             }
 
-            // Post-activation live verification gate (Sections 32, 45, 77)
+            // Post-activation live verification gate: ensure firewall, Tor, and interfaces are fully healthy
             let verify_opts = crate::verify::VerifyOptions {
                 state_file_override: options.state_file_override.clone(),
                 ..Default::default()
@@ -194,7 +193,7 @@ impl StartupTransaction {
         match result {
             Ok(success) => Ok(success),
             Err(e) => {
-                // Fail-Closed Rollback Engine (Sections 30, 47, 81)
+                // Fail-Closed Rollback: safely restore baseline state or fail closed
                 Self::rollback(
                     &baseline,
                     &fw_config,

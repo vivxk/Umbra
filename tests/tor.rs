@@ -958,7 +958,7 @@ fn test_custom_cookie_path_missing_fails() {
 
 #[test]
 fn test_request_newnym_fails_when_tor_not_running() {
-    // If Tor process is not running on development host, request_newnym must fail-closed with TorNotRunning
+    // If Tor process is not running on the host, request_newnym must fail-closed with TorNotRunning
     // or fail to find process
     let ident = TorController::find_tor_process();
     if ident.is_ok() && ident.unwrap().is_none() {
