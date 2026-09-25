@@ -324,7 +324,6 @@ impl FirewallController {
             ])
             .output();
 
-        let mut structured_verified = false;
         if let Ok(ref out) = json_output {
             if out.status.success() {
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
@@ -379,7 +378,6 @@ impl FirewallController {
                                 "live ruleset missing base chain output_filter".to_string(),
                             ));
                         }
-                        structured_verified = true;
                     }
                 }
             }
@@ -394,17 +392,20 @@ impl FirewallController {
 
         let ruleset_str = String::from_utf8_lossy(&output.stdout);
 
-        if !structured_verified {
-            if !ruleset_str.contains("chain output_nat") {
-                return Err(UmbraError::FirewallVerificationFailed(
-                    "live ruleset missing chain output_nat".to_string(),
-                ));
-            }
-            if !ruleset_str.contains("chain output_filter") {
-                return Err(UmbraError::FirewallVerificationFailed(
-                    "live ruleset missing chain output_filter".to_string(),
-                ));
-            }
+        Self::verify_ruleset_text_policy(&ruleset_str, config)
+    }
+
+    /// Verifies that a ruleset text contains all required chains and security policies
+    pub fn verify_ruleset_text_policy(ruleset_str: &str, config: &FirewallConfig) -> Result<()> {
+        if !ruleset_str.contains("chain output_nat") {
+            return Err(UmbraError::FirewallVerificationFailed(
+                "live ruleset missing chain output_nat".to_string(),
+            ));
+        }
+        if !ruleset_str.contains("chain output_filter") {
+            return Err(UmbraError::FirewallVerificationFailed(
+                "live ruleset missing chain output_filter".to_string(),
+            ));
         }
 
         // Verify Tor UID exceptions

@@ -625,6 +625,14 @@ fn test_recover_normal_fails_and_preserves_state_on_mac_restore_error_in_netns()
         state_path.exists(),
         "state file must NOT be deleted when interface restoration fails"
     );
+    let loaded = ActiveState::load_from_path(&state_path)
+        .unwrap()
+        .expect("loaded state");
+    assert_eq!(
+        loaded.status,
+        umbra::runtime_state::UmbraStatus::RecoveryRequired,
+        "Status must be RecoveryRequired when restoration fails in recover_normal"
+    );
 
     // CRITICAL: firewall table MUST remain active and fail-closed
     assert!(
@@ -834,6 +842,14 @@ fn test_stop_fails_and_keeps_firewall_on_mac_restore_error_in_netns() {
         state_path.exists(),
         "state file must NOT be deleted when interface restoration fails during stop"
     );
+    let loaded = ActiveState::load_from_path(&state_path)
+        .unwrap()
+        .expect("loaded state");
+    assert_eq!(
+        loaded.status,
+        umbra::runtime_state::UmbraStatus::RecoveryRequired,
+        "Status must be RecoveryRequired when restoration fails during stop"
+    );
 
     // Clean up
     let _ = fs::remove_file(state_path);
@@ -890,6 +906,14 @@ fn test_recover_force_fails_and_preserves_state_on_mac_restore_error_in_netns() 
     assert!(
         state_path.exists(),
         "state file must NOT be deleted when force recovery encounters restoration error"
+    );
+    let loaded = ActiveState::load_from_path(&state_path)
+        .unwrap()
+        .expect("loaded state");
+    assert_eq!(
+        loaded.status,
+        umbra::runtime_state::UmbraStatus::RecoveryRequired,
+        "Status must be RecoveryRequired when restoration fails in recover_force"
     );
 
     // CRITICAL: firewall table MUST remain active and fail-closed

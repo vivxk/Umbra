@@ -327,6 +327,24 @@ fn test_mac_mismatch_prevents_active_status_in_netns() {
     let live_mac = InterfaceController::read_mac(dev_name).unwrap();
     assert_ne!(live_mac.to_string(), state.randomized_mac);
 
+    let verify_opts = umbra::verify::VerifyOptions {
+        state_file_override: Some(state_path.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+    let report =
+        umbra::verify::LiveVerifier::verify_with_options(&verify_opts).expect("verify report");
+    assert_ne!(
+        report.status,
+        UmbraStatus::Active,
+        "MAC mismatch must prevent ACTIVE status"
+    );
+    assert_eq!(
+        report.status,
+        UmbraStatus::RecoveryRequired,
+        "MAC mismatch must report RECOVERY_REQUIRED status"
+    );
+    assert!(!report.mac_matches_state);
+
     // Teardown
     FirewallController::teardown_with_id(
         &fw_config.table_family,

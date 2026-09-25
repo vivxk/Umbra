@@ -826,6 +826,15 @@ impl TorController {
 
     /// Verifies that Tor TransPort is bound on 127.0.0.1 and matches expected identity
     pub fn verify_transport_with_identity(port: u16, expected: Option<&TorIdentity>) -> Result<()> {
+        Self::verify_transport_at(Path::new("/proc"), port, expected)
+    }
+
+    /// Verifies that Tor TransPort is bound on 127.0.0.1 and matches expected identity using specified proc dir
+    pub fn verify_transport_at(
+        proc_dir: &Path,
+        port: u16,
+        expected: Option<&TorIdentity>,
+    ) -> Result<()> {
         let addr = format!("{LOCAL_LOOPBACK_IPV4}:{port}");
         let socket_addr: SocketAddr = addr.parse().map_err(|_| UmbraError::TorListenerMissing {
             port,
@@ -836,8 +845,8 @@ impl TorController {
         match stream {
             Ok(_) => {
                 verify_socket_ownership(
-                    Path::new("/proc/net/tcp"),
-                    Path::new("/proc"),
+                    &proc_dir.join("net/tcp"),
+                    proc_dir,
                     port,
                     expected.map(|i| i.uid),
                     expected.map(|i| i.pid),
@@ -878,6 +887,15 @@ impl TorController {
 
     /// Verifies that Tor DNSPort is bound on UDP 127.0.0.1 and matches expected identity
     pub fn verify_dnsport_with_identity(port: u16, expected: Option<&TorIdentity>) -> Result<()> {
+        Self::verify_dnsport_at(Path::new("/proc"), port, expected)
+    }
+
+    /// Verifies that Tor DNSPort is bound on UDP 127.0.0.1 and matches expected identity using specified proc dir
+    pub fn verify_dnsport_at(
+        proc_dir: &Path,
+        port: u16,
+        expected: Option<&TorIdentity>,
+    ) -> Result<()> {
         let target_addr = format!("{LOCAL_LOOPBACK_IPV4}:{port}");
         let socket = UdpSocket::bind("127.0.0.1:0").map_err(|e| {
             UmbraError::DnsProtectionFailed(format!("failed to bind test UDP socket: {e}"))
@@ -935,8 +953,8 @@ impl TorController {
                     });
                 }
                 verify_socket_ownership(
-                    Path::new("/proc/net/udp"),
-                    Path::new("/proc"),
+                    &proc_dir.join("net/udp"),
+                    proc_dir,
                     port,
                     expected.map(|i| i.uid),
                     expected.map(|i| i.pid),
@@ -985,9 +1003,18 @@ impl TorController {
         port: u16,
         expected: Option<&TorIdentity>,
     ) -> Result<()> {
+        Self::verify_controlport_at(Path::new("/proc"), port, expected)
+    }
+
+    /// Verifies that Tor ControlPort is bound on 127.0.0.1, owned by expected identity, and speaks RFC 250 protocol using specified proc dir
+    pub fn verify_controlport_at(
+        proc_dir: &Path,
+        port: u16,
+        expected: Option<&TorIdentity>,
+    ) -> Result<()> {
         verify_socket_ownership(
-            Path::new("/proc/net/tcp"),
-            Path::new("/proc"),
+            &proc_dir.join("net/tcp"),
+            proc_dir,
             port,
             expected.map(|i| i.uid),
             expected.map(|i| i.pid),

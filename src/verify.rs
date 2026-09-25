@@ -24,12 +24,42 @@ pub struct VerificationReport {
     pub details: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VerifyOptions {
+    pub state_file_override: Option<String>,
+    pub proc_dir_override: Option<String>,
+    pub sysfs_root_override: Option<String>,
+}
+
 pub struct LiveVerifier;
 
 impl LiveVerifier {
     /// Conducts a comprehensive live verification against the actual kernel and processes
     pub fn verify_current_state() -> Result<VerificationReport> {
-        let (active_state, corrupt_state_err) = match ActiveState::load() {
+        Self::verify_with_options(&VerifyOptions::default())
+    }
+
+    /// Conducts live verification with customizable paths for testing and isolated verification
+    pub fn verify_with_options(options: &VerifyOptions) -> Result<VerificationReport> {
+        let state_path = options
+            .state_file_override
+            .as_deref()
+            .map(std::path::Path::new)
+            .unwrap_or_else(|| std::path::Path::new(crate::constants::RUNTIME_STATE_FILE));
+
+        let proc_dir = options
+            .proc_dir_override
+            .as_deref()
+            .map(std::path::Path::new)
+            .unwrap_or_else(|| std::path::Path::new("/proc"));
+
+        let sysfs_root = options
+            .sysfs_root_override
+            .as_deref()
+            .map(std::path::Path::new)
+            .unwrap_or_else(|| std::path::Path::new("/sys/class/net"));
+
+        let (active_state, corrupt_state_err) = match ActiveState::load_from_path(state_path) {
             Ok(s) => (s, None),
             Err(e) => (None, Some(e)),
         };
@@ -111,7 +141,11 @@ impl LiveVerifier {
 
         // 2. Check Tor process
         let mut verified_tor_ident = None;
-        match TorController::find_tor_process() {
+        match TorController::find_tor_process_at(
+            proc_dir,
+            Some(0),
+            crate::constants::TRUSTED_TOR_PREFIXES,
+        ) {
             Ok(Some(ident)) => {
                 tor_process_ok = true;
                 details.push(format!(
@@ -134,7 +168,8 @@ impl LiveVerifier {
             .as_ref()
             .map(|s| s.tor_transport_port)
             .unwrap_or(DEFAULT_TOR_TRANSPORT);
-        match TorController::verify_transport_with_identity(
+        match TorController::verify_transport_at(
+            proc_dir,
             transport_port,
             verified_tor_ident.as_ref(),
         ) {
@@ -160,7 +195,7 @@ impl LiveVerifier {
             .as_ref()
             .map(|s| s.tor_dns_port)
             .unwrap_or(DEFAULT_TOR_DNSPORT);
-        match TorController::verify_dnsport_with_identity(dns_port, verified_tor_ident.as_ref()) {
+        match TorController::verify_dnsport_at(proc_dir, dns_port, verified_tor_ident.as_ref()) {
             Ok(_) => {
                 dnsport_ok = true;
                 details.push(format!(
@@ -179,7 +214,8 @@ impl LiveVerifier {
         // 5. Check Tor ControlPort (local-only, Tor protocol)
         let mut controlport_ok = false;
         let control_port = DEFAULT_TOR_CONTROLPORT;
-        match TorController::verify_controlport_with_identity(
+        match TorController::verify_controlport_at(
+            proc_dir,
             control_port,
             verified_tor_ident.as_ref(),
         ) {
@@ -201,19 +237,29 @@ impl LiveVerifier {
         // 6. Check Interface & MAC
         if let Some(ref state) = active_state {
             interface_name = Some(state.interface.clone());
-            if let Ok(current_mac) = InterfaceController::read_mac(&state.interface) {
-                live_mac_str = Some(current_mac.to_string());
-                if current_mac.to_string().to_lowercase() == state.randomized_mac.to_lowercase() {
-                    mac_matches_state = true;
+            match InterfaceController::read_mac_from_sysfs(sysfs_root, &state.interface) {
+                Ok(current_mac) => {
+                    live_mac_str = Some(current_mac.to_string());
+                    if current_mac.to_string().to_lowercase() == state.randomized_mac.to_lowercase()
+                    {
+                        mac_matches_state = true;
+                        details.push(format!(
+                            "mac: interface {} has expected randomized MAC {}",
+                            state.interface, current_mac
+                        ));
+                    } else {
+                        details.push(format!(
+                            "mac: interface {} MAC mismatch (live: {}, expected: {})",
+                            state.interface, current_mac, state.randomized_mac
+                        ));
+                    }
+                }
+                Err(e) => {
                     details.push(format!(
-                        "mac: interface {} has expected randomized MAC {}",
-                        state.interface, current_mac
+                        "mac: failed to inspect MAC on interface {}: {e}",
+                        state.interface
                     ));
-                } else {
-                    details.push(format!(
-                        "mac: interface {} MAC mismatch (live: {}, expected: {})",
-                        state.interface, current_mac, state.randomized_mac
-                    ));
+                    inspection_error = true;
                 }
             }
         }

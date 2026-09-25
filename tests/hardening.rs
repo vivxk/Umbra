@@ -102,8 +102,14 @@ fn test_missing_dns_redirect_fails_firewall_verification() {
     // Verify authentication succeeds on marker
     assert!(FirewallController::authenticate_ruleset_text(&missing_dns).is_ok());
 
-    // But check_syntax or structural checks ensure that DNS redirection is mandatory
-    assert!(!missing_dns.contains("redirect to :5353"));
+    // Policy verification MUST fail when DNS redirect is missing
+    let err = FirewallController::verify_ruleset_text_policy(&missing_dns, &config).unwrap_err();
+    match err {
+        UmbraError::FirewallVerificationFailed(msg) => {
+            assert!(msg.contains("missing dns redirection rule"));
+        }
+        other => panic!("expected FirewallVerificationFailed, got {other:?}"),
+    }
 }
 
 #[test]
@@ -122,7 +128,14 @@ fn test_missing_transport_redirect_fails_firewall_verification() {
     let full = FirewallController::generate_ruleset(&config);
     let missing_transport = full.replace("redirect to :9040", "");
 
-    assert!(!missing_transport.contains("redirect to :9040"));
+    let err =
+        FirewallController::verify_ruleset_text_policy(&missing_transport, &config).unwrap_err();
+    match err {
+        UmbraError::FirewallVerificationFailed(msg) => {
+            assert!(msg.contains("missing transport redirection rule"));
+        }
+        other => panic!("expected FirewallVerificationFailed, got {other:?}"),
+    }
 }
 
 #[test]
@@ -265,4 +278,33 @@ fn test_proc_inspection_failure_becomes_unknown_or_returns_inspection_error() {
         }
         other => panic!("expected TorInspectionError, got {other:?}"),
     }
+
+    // Verify requirement 12: /proc inspection failure evaluates LiveVerifier to UNKNOWN status
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let active_state = ActiveState::new_with_status(
+        "act_proc_test".to_string(),
+        "eth0".to_string(),
+        "02:aa:bb:cc:dd:ee".to_string(),
+        "02:11:22:33:44:55".to_string(),
+        true,
+        1000,
+        9040,
+        5353,
+        "umbra".to_string(),
+        UmbraStatus::Active,
+    );
+    active_state.save_to_path(tmp.path()).expect("save state");
+
+    let verify_opts = umbra::verify::VerifyOptions {
+        state_file_override: Some(tmp.path().to_string_lossy().to_string()),
+        proc_dir_override: Some("/nonexistent_dir_umbra/proc".to_string()),
+        ..Default::default()
+    };
+    let report =
+        umbra::verify::LiveVerifier::verify_with_options(&verify_opts).expect("verify report");
+    assert_eq!(
+        report.status,
+        UmbraStatus::Unknown,
+        "/proc inspection failure must cause LiveVerifier to evaluate to UNKNOWN status"
+    );
 }

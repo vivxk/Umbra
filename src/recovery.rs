@@ -125,7 +125,12 @@ impl RecoveryController {
             was_up: state.interface_was_up,
         };
 
-        InterfaceController::restore_baseline(&baseline)?;
+        if let Err(e) = InterfaceController::restore_baseline(&baseline) {
+            let mut updated_state = state.clone();
+            updated_state.status = crate::runtime_state::UmbraStatus::RecoveryRequired;
+            let _ = updated_state.save_to_path(state_path);
+            return Err(e);
+        }
 
         // 2. Teardown Firewall with strict ownership authentication and activation ID check
         FirewallController::teardown_with_id(
@@ -205,7 +210,12 @@ impl RecoveryController {
             };
 
             // Restoring baseline MUST NOT swallow errors; if MAC restore fails, firewall remains active!
-            InterfaceController::restore_baseline(&baseline)?;
+            if let Err(e) = InterfaceController::restore_baseline(&baseline) {
+                let mut updated_state = state.clone();
+                updated_state.status = crate::runtime_state::UmbraStatus::RecoveryRequired;
+                let _ = updated_state.save_to_path(state_path);
+                return Err(e);
+            }
             actions.push(format!(
                 "Restored interface {} to original MAC {}",
                 state.interface, state.original_mac
@@ -305,12 +315,15 @@ impl RecoveryController {
                     original_mac: orig_mac,
                     was_up: state.interface_was_up,
                 };
-                InterfaceController::restore_baseline(&baseline).map_err(|e| {
-                    UmbraError::RecoveryUncertain(format!(
+                if let Err(e) = InterfaceController::restore_baseline(&baseline) {
+                    let mut updated_state = state.clone();
+                    updated_state.status = crate::runtime_state::UmbraStatus::RecoveryRequired;
+                    let _ = updated_state.save_to_path(state_path);
+                    return Err(UmbraError::RecoveryUncertain(format!(
                         "Force recovery failed to restore interface {}: {e}. Runtime state and firewall preserved.",
                         state.interface
-                    ))
-                })?;
+                    )));
+                }
                 actions.push(format!(
                     "Restored interface {} to original MAC {}",
                     state.interface, state.original_mac
